@@ -1,0 +1,18 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      XDR_BOOTSTRAP_ADMIN_USERNAME: ${XDR_BOOTSTRAP_ADMIN_USERNAME-}
+      XDR_BOOTSTRAP_ADMIN_PASSWORD: ${XDR_BOOTSTRAP_ADMIN_PASSWORD-}
+      XDR_AGENT_KEY: ${XDR_AGENT_KEY:?Set XDR_AGENT_KEY before starting XDR}
+      XDR_WAZUH_INGEST_KEY: ${XDR_WAZUH_INGEST_KEY-}
+      XDR_SURICATA_INGEST_KEY: ${XDR_SURICATA_INGEST_KEY-}
+    volumes:
+      - xdr-data:/app/data
+
+volumes:
+  xdr-data:

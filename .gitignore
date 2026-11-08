@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+data/
+*.sqlite3
+.env
+.env.*
+!.env.example
+frontend/xdr-dashboard/node_modules/
+frontend/xdr-dashboard/dist/

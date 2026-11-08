@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0b111b" />
+    <title>XDR | Security Operations</title>
+    <link rel="stylesheet" href="/dashboard/dashboard.css?v=20261102" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <a class="brand" href="/dashboard/" aria-label="XDR dashboard">
+          <span class="brand-mark">X</span>
+          <span class="brand-name">nexus<span>XDR</span><small>SECURITY OPERATIONS</small></span>
+        </a>
+        <div class="nav-label">WORKSPACE</div>
+        <a class="nav-link active" href="#overview"><span class="nav-icon">◫</span> Tổng quan</a>
+        <a class="nav-link" href="#telemetry"><span class="nav-icon">⌁</span> Nguồn dữ liệu</a>
+        <a class="nav-link" href="#events"><span class="nav-icon">≋</span> Sự kiện</a>
+        <a class="nav-link" href="#incidents"><span class="nav-icon">◇</span> Incident</a>
+        <div class="sidebar-foot">
+          <span class="live-dot"></span>
+          <span><strong>XDR API</strong><small id="api-state">Đang kết nối...</small></span>
+          <span class="pulse"></span>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div class="breadcrumb">SECURITY OPERATIONS <span>/</span> OVERVIEW</div>
+          <div class="top-actions">
+            <span class="updated" id="last-updated">Chưa đồng bộ</span>
+            <button class="refresh-button" id="refresh-button" type="button"><span>↻</span> Làm mới</button>
+            <button class="refresh-button" id="change-password-button" type="button" hidden>Đổi mật khẩu</button>
+            <button class="refresh-button" id="user-management-button" type="button" hidden>Tài khoản</button>
+            <button class="refresh-button" id="response-management-button" type="button" hidden>Response</button>
+            <button class="refresh-button" id="logout-button" type="button" hidden>Đăng xuất</button>
+            <div class="avatar" id="avatar" title="XDR analyst">XA</div>
+          </div>
+        </header>
+
+        <section class="content" id="overview">
+          <div class="page-heading">
+            <div>
+              <div class="eyebrow"><span class="live-dot"></span> LIVE MONITORING</div>
+              <h1>Trung tâm giám sát</h1>
+              <p class="subheading">Tổng quan telemetry và hoạt động bảo mật được XDR tiếp nhận.</p>
+            </div>
+            <div class="range-pill"><span>◷</span> 24 giờ gần nhất <span class="chevron">⌄</span></div>
+          </div>
+
+          <div class="notice" id="notice">
+            Dữ liệu hiển thị là event đã được lưu trong XDR. Wazuh và Suricata chỉ xuất hiện khi nguồn đó thực sự gửi event vào API.
+          </div>
+          <div class="error-banner" id="error-banner" role="alert" hidden></div>
+
+          <section class="metric-grid" aria-label="Tổng quan số liệu">
+            <article class="metric-card">
+              <div class="metric-top"><span>TỔNG SỰ KIỆN</span><span class="metric-icon cyan">≋</span></div>
+              <div class="metric-value" id="metric-events">—</div>
+              <div class="metric-foot"><span class="tiny-dot cyan-bg"></span><span id="metric-event-caption">Đang tải event</span></div>
+              <div class="metric-spark spark-cyan"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+            </article>
+            <article class="metric-card">
+              <div class="metric-top"><span>ALERT ĐANG MỞ</span><span class="metric-icon orange">!</span></div>
+              <div class="metric-value" id="metric-alerts">—</div>
+              <div class="metric-foot"><span class="tiny-dot orange-bg"></span><span>Cần được phân tích</span></div>
+              <div class="metric-spark spark-orange"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+            </article>
+            <article class="metric-card">
+              <div class="metric-top"><span>HOST ĐƯỢC QUAN SÁT</span><span class="metric-icon purple">⌘</span></div>
+              <div class="metric-value" id="metric-hosts">—</div>
+              <div class="metric-foot"><span class="tiny-dot purple-bg"></span><span>Endpoint có event</span></div>
+              <div class="metric-spark spark-purple"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+            </article>
+            <article class="metric-card">
+              <div class="metric-top"><span>INCIDENT CHƯA ĐÓNG</span><span class="metric-icon green">◇</span></div>
+              <div class="metric-value" id="metric-incidents">—</div>
+              <div class="metric-foot"><span class="tiny-dot green-bg"></span><span>Đang theo dõi</span></div>
+              <div class="metric-spark spark-green"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+            </article>
+          </section>
+
+          <section class="middle-grid">
+            <article class="panel activity-panel">
+              <div class="panel-heading">
+                <div><h2>Hoạt động telemetry</h2><p>Event theo giờ · dữ liệu đang tải</p></div>
+                <span class="panel-tag"><span class="tiny-dot cyan-bg"></span> EVENT VOLUME</span>
+              </div>
+              <div class="chart-wrap">
+                <div class="chart-y"><span id="chart-max">0</span><span id="chart-mid">0</span><span>0</span></div>
+                <div class="chart" id="activity-chart" aria-label="Biểu đồ số event theo giờ"></div>
+              </div>
+              <div class="chart-legend"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>Bây giờ</span></div>
+            </article>
+
+            <article class="panel severity-panel">
+              <div class="panel-heading">
+                <div><h2>Mức độ cảnh báo</h2><p>Alerts đang mở</p></div>
+                <span class="more">···</span>
+              </div>
+              <div class="severity-total"><strong id="severity-total">0</strong><span>open alerts</span></div>
+              <div class="severity-bars" id="severity-bars"></div>
+              <div class="severity-note"><span class="tiny-dot green-bg"></span> Dựa trên các rule detection hiện tại</div>
+            </article>
+          </section>
+
+          <section class="panel source-panel" id="telemetry">
+            <div class="panel-heading source-heading">
+              <div><h2>Nguồn telemetry</h2><p>Trạng thái dựa trên event thực tế đã ingest vào XDR</p></div>
+              <span class="source-total" id="source-total">0 event</span>
+            </div>
+            <div class="source-grid" id="source-grid"></div>
+            <div class="source-footnote">“Chờ dữ liệu” nghĩa là chưa thấy event có source tương ứng trong tập dữ liệu vừa tải; không khẳng định collector hoặc kết nối nguồn đã hoạt động.</div>
+          </section>
+
+          <section class="panel events-panel" id="events">
+            <div class="panel-heading events-heading">
+              <div><h2>Event mới nhất</h2><p>Nhật ký gần đây được lưu trong XDR</p></div>
+              <div class="event-controls">
+                <label class="search-box"><span>⌕</span><input id="event-search" type="search" placeholder="Tìm event, host..." /></label>
+                <select id="source-filter" aria-label="Lọc theo nguồn">
+                  <option value="all">Tất cả nguồn</option>
+                  <option value="edr">EDR</option>
+                  <option value="wazuh">Wazuh</option>
+                  <option value="suricata">Suricata</option>
+                </select>
+                <button class="text-button" id="view-all" type="button">Tải lại <span>↗</span></button>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>EVENT TYPE</th><th>NGUỒN</th><th>HOST</th><th>SEVERITY</th><th>THỜI GIAN</th><th></th></tr></thead>
+                <tbody id="events-body"><tr><td colspan="6" class="empty-row">Đang tải event...</td></tr></tbody>
+              </table>
+            </div>
+            <div class="table-footer"><span id="event-count-label">Đang tải...</span><span>Tối đa 500 event mới nhất</span></div>
+          </section>
+
+          <section class="panel incidents-panel" id="incidents">
+            <div class="panel-heading">
+              <div><h2>Incident cần theo dõi</h2><p>Incident có alert chưa resolved</p></div>
+              <span class="panel-tag"><span class="tiny-dot orange-bg"></span> OPEN / ACKNOWLEDGED</span>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>INCIDENT</th><th>HOST</th><th>SEVERITY</th><th>ALERTS</th><th>CẬP NHẬT</th><th>TRẠNG THÁI</th></tr></thead>
+                <tbody id="incidents-body"><tr><td colspan="6" class="empty-row">Đang tải incident...</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+          <footer class="footer"><span>nexusXDR <i>·</i> Security Operations</span><span>Refresh tự động mỗi 15 giây <i>·</i> <a href="/docs">API docs</a></span></footer>
+        </section>
+      </main>
+    </div>
+    <div class="toast" id="toast" role="status"></div>
+    <dialog class="auth-dialog" id="auth-dialog" aria-labelledby="auth-title">
+      <form id="auth-form">
+        <span class="eyebrow"><span class="live-dot"></span> XDR AUTHENTICATION</span>
+        <h2 id="auth-title">Đăng nhập vận hành</h2>
+        <p>Đăng nhập bằng tài khoản do quản trị viên XDR cấp.</p>
+        <label for="login-username">Tên đăng nhập</label>
+        <input id="login-username" name="username" autocomplete="username" required />
+        <label for="login-password">Mật khẩu</label>
+        <input id="login-password" name="password" type="password" autocomplete="current-password" required />
+        <div class="auth-error" id="auth-error" role="alert" hidden></div>
+        <button class="refresh-button" type="submit">Đăng nhập</button>
+      </form>
+    </dialog>
+    <dialog class="users-dialog" id="users-dialog" aria-labelledby="users-title">
+      <div class="dialog-heading">
+        <div><span class="eyebrow">ADMINISTRATION</span><h2 id="users-title">Tài khoản và phân quyền</h2></div>
+        <button class="dialog-close" id="users-close" type="button" aria-label="Đóng">×</button>
+      </div>
+      <p class="role-help">Admin quản lý tài khoản và toàn bộ thao tác; Analyst xem và xử lý alert/incident; Viewer chỉ xem dữ liệu.</p>
+      <div class="auth-error" id="user-error" role="alert" hidden></div>
+      <div class="table-scroll users-table">
+        <table>
+          <thead><tr><th>TÀI KHOẢN</th><th>ROLE</th><th>TRẠNG THÁI</th><th></th></tr></thead>
+          <tbody id="users-body"></tbody>
+        </table>
+      </div>
+      <form class="user-create-form" id="user-create-form">
+        <h3>Tạo tài khoản</h3>
+        <label>Tên đăng nhập<input name="username" minlength="3" maxlength="64" pattern="[A-Za-z0-9_\-]+" autocomplete="off" required /></label>
+        <label>Mật khẩu tài khoản (ít nhất 12 ký tự)<input name="password" type="password" minlength="12" maxlength="256" autocomplete="new-password" required /></label>
+        <label>Role<select name="role"><option value="viewer">Viewer</option><option value="analyst">Analyst</option><option value="admin">Admin</option></select></label>
+        <button class="refresh-button" type="submit">Tạo tài khoản</button>
+      </form>
+    </dialog>
+    <dialog class="users-dialog" id="response-dialog" aria-labelledby="response-title">
+      <div class="dialog-heading">
+        <div><span class="eyebrow">TWO-PERSON APPROVAL</span><h2 id="response-title">Yêu cầu phản ứng sự cố</h2></div>
+        <button class="dialog-close" id="response-close" type="button" aria-label="Đóng">×</button>
+      </div>
+      <p class="role-help">Tạo yêu cầu chỉ ghi vào hàng đợi, không thực thi trên máy hoặc firewall. Admin khác phải duyệt hoặc từ chối.</p>
+      <div class="auth-error" id="response-error" role="alert" hidden></div>
+      <form class="user-create-form" id="response-create-form">
+        <label>Hành động<select name="action" id="response-action"><option value="isolate-host">Cô lập host</option><option value="kill-process">Dừng process</option><option value="block-ip">Chặn IP</option></select></label>
+        <label data-response-field="host_id">Host ID<input name="host_id" maxlength="255" /></label>
+        <label data-response-field="process_id" hidden>Process ID<input name="process_id" type="number" min="1" max="4294967295" /></label>
+        <label data-response-field="ip_address" hidden>Địa chỉ IP<input name="ip_address" /></label>
+        <label class="response-reason">Lý do<textarea name="reason" minlength="10" maxlength="500" required></textarea></label>
+        <button class="refresh-button" type="submit">Gửi yêu cầu</button>
+      </form>
+      <div class="table-scroll users-table">
+        <table>
+          <thead><tr><th>HÀNH ĐỘNG / ĐÍCH</th><th>LÝ DO / NGƯỜI TẠO</th><th>TRẠNG THÁI</th><th>DUYỆT</th></tr></thead>
+          <tbody id="response-requests-body"></tbody>
+        </table>
+      </div>
+    </dialog>
+    <dialog class="auth-dialog" id="password-dialog" aria-labelledby="password-title">
+      <form id="password-form">
+        <span class="eyebrow">ACCOUNT SECURITY</span>
+        <h2 id="password-title">Đổi mật khẩu</h2>
+        <label for="current-password">Mật khẩu hiện tại</label>
+        <input id="current-password" name="current_password" type="password" autocomplete="current-password" required />
+        <label for="new-password">Mật khẩu mới (ít nhất 12 ký tự)</label>
+        <input id="new-password" name="new_password" type="password" minlength="12" maxlength="256" autocomplete="new-password" required />
+        <label for="confirm-password">Nhập lại mật khẩu mới</label>
+        <input id="confirm-password" name="confirm_password" type="password" minlength="12" maxlength="256" autocomplete="new-password" required />
+        <div class="auth-error" id="password-error" role="alert" hidden></div>
+        <button class="refresh-button" type="submit">Cập nhật mật khẩu</button>
+      </form>
+    </dialog>
+    <dialog class="event-dialog" id="event-dialog">
+      <div class="dialog-heading"><div><span class="eyebrow">EVENT DETAILS</span><h2 id="dialog-title">Event</h2></div><button class="dialog-close" id="dialog-close" type="button" aria-label="Đóng">×</button></div>
+      <div class="dialog-meta" id="dialog-meta"></div>
+      <pre id="dialog-raw"></pre>
+    </dialog>
+    <script src="/dashboard/dashboard.js?v=20261102" defer></script>
+  </body>
+</html>

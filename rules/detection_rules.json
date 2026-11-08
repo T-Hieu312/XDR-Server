@@ -1,0 +1,29 @@
+[
+  {
+    "id": "example-suspicious-process",
+    "name": "Suspicious process execution",
+    "event_type": "suspicious_process",
+    "severity": "high",
+    "confidence": 0.9,
+    "mitre_attack": ["T1059"],
+    "conditions": {}
+  },
+  {
+    "id": "suricata-et-alert",
+    "name": "Suricata network alert",
+    "event_type": "network_alert",
+    "severity": "high",
+    "confidence": 0.85,
+    "mitre_attack": ["T1071"],
+    "conditions": {}
+  },
+  {
+    "id": "wazuh-auth-failure-burst",
+    "name": "Server authentication failure burst",
+    "event_type": "authentication_failure",
+    "severity": "medium",
+    "confidence": 0.8,
+    "mitre_attack": ["T1110"],
+    "conditions": {}
+  }
+]
