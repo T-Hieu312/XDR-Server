@@ -9,3 +9,5 @@ data/
 !.env.example
 frontend/xdr-dashboard/node_modules/
 frontend/xdr-dashboard/dist/
+*.joblib
+backend/start-server.bat

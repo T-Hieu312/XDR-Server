@@ -11,6 +11,8 @@ services:
       XDR_AGENT_KEY: ${XDR_AGENT_KEY:?Set XDR_AGENT_KEY before starting XDR}
       XDR_WAZUH_INGEST_KEY: ${XDR_WAZUH_INGEST_KEY-}
       XDR_SURICATA_INGEST_KEY: ${XDR_SURICATA_INGEST_KEY-}
+      XDR_AI_MODEL_PATH: /app/data/ai_model.joblib
+      XDR_AI_INTERVAL_SECONDS: ${XDR_AI_INTERVAL_SECONDS:-60}
     volumes:
       - xdr-data:/app/data
 

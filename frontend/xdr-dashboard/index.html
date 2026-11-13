@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#0b111b" />
     <title>XDR | Security Operations</title>
-    <link rel="stylesheet" href="/dashboard/dashboard.css?v=20261102" />
+    <link rel="stylesheet" href="/dashboard/dashboard.css?v=20261111" />
   </head>
   <body>
     <div class="shell">
@@ -19,6 +19,7 @@
         <a class="nav-link" href="#telemetry"><span class="nav-icon">⌁</span> Nguồn dữ liệu</a>
         <a class="nav-link" href="#events"><span class="nav-icon">≋</span> Sự kiện</a>
         <a class="nav-link" href="#incidents"><span class="nav-icon">◇</span> Incident</a>
+        <a class="nav-link" href="#ai"><span class="nav-icon">✦</span> AI phát hiện</a>
         <div class="sidebar-foot">
           <span class="live-dot"></span>
           <span><strong>XDR API</strong><small id="api-state">Đang kết nối...</small></span>
@@ -150,6 +151,53 @@
               </table>
             </div>
           </section>
+          <section class="panel ai-panel" id="ai">
+            <div class="panel-heading ai-heading">
+              <div><h2>AI phát hiện bất thường</h2><p>Isolation Forest + novelty so với baseline · chấm theo host trong cửa sổ 5 phút</p></div>
+              <div class="event-controls">
+                <span class="panel-tag" id="ai-state-tag"><span class="tiny-dot"></span> ĐANG TẢI</span>
+                <button class="refresh-button" id="ai-analyze-button" type="button" hidden><span>✦</span> Chấm ngay</button>
+              </div>
+            </div>
+
+            <div class="ai-stat-grid">
+              <div class="ai-stat"><span>MODEL</span><strong id="ai-model-version">—</strong><small id="ai-model-trained">Chưa có thông tin</small></div>
+              <div class="ai-stat"><span>BASELINE</span><strong id="ai-training-windows">—</strong><small id="ai-training-caption">cửa sổ dùng để train</small></div>
+              <div class="ai-stat"><span>ĐÃ CHẤM</span><strong id="ai-window-count">—</strong><small id="ai-window-caption">cửa sổ gần nhất</small></div>
+              <div class="ai-stat ai-stat-alert"><span>BẤT THƯỜNG</span><strong id="ai-anomaly-count">—</strong><small id="ai-anomaly-caption">cửa sổ vượt ngưỡng</small></div>
+            </div>
+
+            <div class="ai-setup" id="ai-setup" hidden>
+              <strong>AI chưa được bật vì chưa có model.</strong>
+              <span>Thu baseline sạch bằng EDR agent (tối thiểu 50 cửa sổ 5 phút), sau đó train tại thư mục backend:</span>
+              <code>python -m ai.train --since 2026-11-01 --until 2026-11-06</code>
+              <span>Server tự nạp model mới, không cần khởi động lại.</span>
+            </div>
+
+            <div class="ai-timeline-wrap">
+              <div class="ai-timeline-head"><span>AI SCORE THEO CỬA SỔ</span><span class="ai-legend"><i class="normal"></i> bình thường <i class="anomaly"></i> bất thường <i class="line"></i> ngưỡng 0.5</span></div>
+              <div class="ai-timeline" id="ai-timeline" aria-label="AI score của các cửa sổ gần nhất"></div>
+            </div>
+
+            <div class="ai-controls">
+              <select id="ai-host-filter" aria-label="Lọc theo host"><option value="all">Tất cả host</option></select>
+              <label class="ai-check"><input id="ai-anomaly-filter" type="checkbox" /> Chỉ cửa sổ bất thường</label>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>HOST</th><th>CỬA SỔ</th><th>EVENT</th><th>AI SCORE</th><th>LÝ DO CHÍNH</th><th>KẾT LUẬN</th></tr></thead>
+                <tbody id="ai-windows-body"><tr><td colspan="6" class="empty-row">Đang tải kết quả AI...</td></tr></tbody>
+              </table>
+            </div>
+
+            <h3 class="ai-subtitle">Alert có điểm AI</h3>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>ALERT</th><th>SEVERITY</th><th>AI SCORE</th><th>RISK</th><th>MITRE</th><th>TRẠNG THÁI</th></tr></thead>
+                <tbody id="ai-alerts-body"><tr><td colspan="6" class="empty-row">Đang tải alert...</td></tr></tbody>
+              </table>
+            </div>
+          </section>
           <footer class="footer"><span>nexusXDR <i>·</i> Security Operations</span><span>Refresh tự động mỗi 15 giây <i>·</i> <a href="/docs">API docs</a></span></footer>
         </section>
       </main>
@@ -230,6 +278,17 @@
       <div class="dialog-meta" id="dialog-meta"></div>
       <pre id="dialog-raw"></pre>
     </dialog>
-    <script src="/dashboard/dashboard.js?v=20261102" defer></script>
+    <dialog class="event-dialog" id="ai-dialog">
+      <div class="dialog-heading"><div><span class="eyebrow">AI WINDOW</span><h2 id="ai-dialog-title">Cửa sổ</h2></div><button class="dialog-close" id="ai-dialog-close" type="button" aria-label="Đóng">×</button></div>
+      <div class="dialog-meta" id="ai-dialog-meta"></div>
+      <p class="role-help">So sánh từng feature của cửa sổ với p99 của baseline sạch. Feature vượt baseline được tô đỏ; đây là căn cứ giải thích vì sao AI đánh giá cửa sổ là bất thường.</p>
+      <div class="table-scroll users-table ai-feature-table">
+        <table>
+          <thead><tr><th>FEATURE</th><th>Ý NGHĨA</th><th>GIÁ TRỊ</th><th>BASELINE P99</th></tr></thead>
+          <tbody id="ai-dialog-features"></tbody>
+        </table>
+      </div>
+    </dialog>
+    <script src="/dashboard/dashboard.js?v=20261111" defer></script>
   </body>
 </html>

@@ -1,3 +1,6 @@
+import asyncio
+import contextlib
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -16,6 +19,20 @@ from api.users import router as users_router
 from database.database import init_db
 from database.users import ensure_bootstrap_admin
 from collectors.ingest_api import router as collectors_router
+from api.ai import router as ai_router
+from ai.analyzer import analyze_pending
+
+log = logging.getLogger("xdr.ai")
+
+
+async def ai_loop(interval_seconds: int) -> None:
+    """Periodically score closed host/time windows with the AI model."""
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            await asyncio.to_thread(analyze_pending)
+        except Exception:  # keep the API alive if one analysis run fails
+            log.exception("AI analysis run failed")
 
 
 @asynccontextmanager
@@ -25,7 +42,14 @@ async def lifespan(_: FastAPI):
         os.environ.get("XDR_BOOTSTRAP_ADMIN_USERNAME"),
         os.environ.get("XDR_BOOTSTRAP_ADMIN_PASSWORD"),
     )
+    task = None
+    if os.environ.get("XDR_AI_ENABLED", "1") != "0":
+        task = asyncio.create_task(ai_loop(int(os.environ.get("XDR_AI_INTERVAL_SECONDS", "60"))))
     yield
+    if task is not None:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 app = FastAPI(title="XDR Platform API", version="0.1.0", lifespan=lifespan)
@@ -56,3 +80,4 @@ app.include_router(incidents_router)
 app.include_router(hosts_router)
 app.include_router(response_router)
 app.include_router(users_router)
+app.include_router(ai_router)

@@ -6,9 +6,24 @@ from typing import Any
 from pydantic import ValidationError
 
 from database.database import save_event_with_alerts
-from detection.anomaly_engine import anomaly_score
+from detection.ioc_engine import load_iocs, match_iocs
 from detection.rule_engine import load_default_rules, match_event
 from models.event import Event
+
+
+def load_detection_content() -> tuple[list[dict[str, Any]], dict[str, set[str]]]:
+    return load_default_rules(), load_iocs()
+
+
+def detect_event(
+    event_data: dict[str, Any], rules: list[dict[str, Any]], iocs: dict[str, set[str]]
+) -> list[dict[str, Any]]:
+    """Per-event detection: rule matches plus IOC matches.
+
+    AI scoring is not done here: the model scores whole host/time windows
+    after they close (ai.analyzer) and then enriches these alerts' ai_score.
+    """
+    return match_event(event_data, rules) + match_iocs(event_data, iocs)
 
 
 def ingest_normalized_events(events: list[dict[str, Any]], source: str) -> dict[str, int]:
@@ -25,14 +40,10 @@ def ingest_normalized_events(events: list[dict[str, Any]], source: str) -> dict[
 
     accepted = 0
     duplicates = 0
-    rules = load_default_rules()
+    rules, iocs = load_detection_content()
     for event_data in validated_events:
         try:
-            save_event_with_alerts(
-                event_data,
-                match_event(event_data, rules),
-                anomaly_score(event_data),
-            )
+            save_event_with_alerts(event_data, detect_event(event_data, rules, iocs))
         except sqlite3.IntegrityError as error:
             if "events.event_id" not in str(error):
                 raise
