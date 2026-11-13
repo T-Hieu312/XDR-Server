@@ -1,17 +1,3 @@
-"""Hybrid anomaly model: Isolation Forest + baseline novelty, with explanations.
-
-Two complementary detectors are calibrated on the same benign baseline:
-
-* Isolation Forest finds unusual *combinations* of feature values. It cannot
-  react to a feature that never varied during training (e.g. LSASS access is
-  always 0 on a clean host), because its trees never split on that feature.
-* Novelty measures how far each feature exceeds its baseline 99th percentile,
-  ``sum(log2((value + 1) / (p99 + 1)))`` over exceeding features, so behaviour
-  never seen in the baseline is still scored.
-
-Each part is thresholded at the ``target_fpr`` quantile of its baseline scores;
-a window is anomalous if either part crosses its threshold.
-"""
 from __future__ import annotations
 
 import os

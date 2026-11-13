@@ -1,16 +1,3 @@
-"""Load events for training/evaluation into the server's canonical event shape.
-
-Supported inputs:
-- the XDR SQLite database (events collected in production/lab),
-- JSON / JSONL / ZIP files containing any of:
-  * server events            {"host_id", "event_type", "raw", ...}
-  * EDR agent events          {"computer", "event_type", "data", ...} (spool.jsonl)
-  * Get-WinEvent export       {"Computer", "Channel", "EventId", "EventData"}
-  * OTRF Security-Datasets    {"Hostname", "Channel", "EventID", <flat Sysmon fields>}
-
-Raw Windows records are filtered exactly like the EDR agent does (same Sysmon
-event IDs, Event 10 only for lsass) so offline data matches what the server sees.
-"""
 from __future__ import annotations
 
 import json

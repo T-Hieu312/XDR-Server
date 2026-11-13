@@ -1,13 +1,3 @@
-"""Behavioural features computed per host and per time window.
-
-Input events use the server's canonical shape (see ``models.event.Event``):
-``{"event_type", "host_id", "timestamp", "source", "raw": {...}}``. For EDR
-events the Sysmon fields live in ``raw["data"]`` (Image, CommandLine,
-DestinationIp, QueryName, TargetFilename, TargetObject, TargetImage...).
-
-This module is the single source of truth for features: training, live
-scoring and offline evaluation all call ``window_features``.
-"""
 from __future__ import annotations
 
 import ipaddress

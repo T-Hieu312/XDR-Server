@@ -1,11 +1,3 @@
-"""Seed a SEPARATE demo database with synthetic EDR data, train a model and run the AI.
-
-For trying the dashboard without Windows/Sysmon. All data is synthetic and must
-not be reported as evaluation results. It never touches the real database or model:
-
-    python -m ai.demo                      # creates data/demo.sqlite3 + data/demo_model.joblib
-    # then start the server on the demo files (see the printed command)
-"""
 from __future__ import annotations
 
 import argparse

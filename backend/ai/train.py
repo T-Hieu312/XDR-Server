@@ -1,13 +1,3 @@
-"""Train the AI anomaly model on a benign baseline.
-
-Examples (run from the ``backend`` directory):
-
-    # baseline = events collected by the EDR agent during a known-clean period
-    python -m ai.train --db data/xdr.sqlite3 --since 2026-11-01 --until 2026-11-06
-
-    # or from exported files (EDR spool.jsonl, Get-WinEvent export, OTRF benign data)
-    python -m ai.train --files baseline1.jsonl baseline2.json
-"""
 from __future__ import annotations
 
 import argparse

@@ -1,16 +1,3 @@
-"""Evaluate the AI model on labelled benign and attack data.
-
-Every host/5-minute window built from ``--benign`` sources is labelled 0 and
-every window from ``--attack`` sources is labelled 1. Use benign data that was
-NOT used for training (e.g. train on days 1-5, evaluate on days 6-7).
-
-    python -m ai.evaluate --benign-db data/xdr.sqlite3 --since 2026-11-06 --until 2026-11-08 \
-        --attack ../datasets/otrf/*.zip --report data/ai_evaluation.json
-
-    # attacks run in the lab and collected by the EDR agent (UTC times you wrote down)
-    python -m ai.evaluate --benign-db data/xdr.sqlite3 --since 2026-11-16 --until 2026-11-17 \
-        --attack-range 2026-11-17T03:00 2026-11-17T03:10 --attack-hosts WIN10-01
-"""
 from __future__ import annotations
 
 import argparse

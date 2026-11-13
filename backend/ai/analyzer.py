@@ -1,14 +1,3 @@
-"""Live AI analysis: score closed host/time windows stored in the XDR database.
-
-Runs periodically (see ``main.py``) or on demand via ``POST /api/ai/analyze``.
-For every closed window not analysed yet it:
-1. computes behavioural features from the stored events,
-2. scores them with the trained Isolation Forest,
-3. writes the result to ``ai_windows``,
-4. raises an ``ai-anomaly`` alert when the window is anomalous, and
-5. copies the window's AI score onto rule alerts raised in that window
-   so their ``risk_score`` combines rule severity and AI evidence.
-"""
 from __future__ import annotations
 
 import logging
