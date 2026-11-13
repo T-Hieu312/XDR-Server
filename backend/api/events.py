@@ -8,8 +8,7 @@ from pydantic import ValidationError
 
 from database.database import list_events as fetch_events
 from database.database import save_event_with_alerts
-from detection.rule_engine import load_default_rules, match_event
-from detection.anomaly_engine import anomaly_score
+from ingestion import detect_event, load_detection_content
 from api.security import require_roles
 from models.event import Event
 
@@ -29,10 +28,9 @@ def ingest_event(
     event: Event, _: dict[str, Any] = Depends(require_roles("admin", "analyst"))
 ) -> dict[str, Any]:
     event_data = event.model_dump(mode="json")
-    matched_rules = match_event(event_data, load_default_rules())
-    ai_score = anomaly_score(event_data)
+    matched_rules = detect_event(event_data, *load_detection_content())
     try:
-        return save_event_with_alerts(event_data, matched_rules, ai_score)
+        return save_event_with_alerts(event_data, matched_rules)
     except sqlite3.IntegrityError as error:
         raise HTTPException(status_code=409, detail="An event with this event_id already exists") from error
 
@@ -57,7 +55,7 @@ def ingest_edr_batch(
 
     accepted = 0
     duplicates = 0
-    rules = load_default_rules()
+    rules, iocs = load_detection_content()
     for raw_event in events:
         computer = str(raw_event.get("computer") or x_agent_id)
         record_id = raw_event.get("record_id")
@@ -84,11 +82,7 @@ def ingest_edr_batch(
 
         event_data = event.model_dump(mode="json")
         try:
-            save_event_with_alerts(
-                event_data,
-                match_event(event_data, rules),
-                anomaly_score(event_data),
-            )
+            save_event_with_alerts(event_data, detect_event(event_data, rules, iocs))
         except sqlite3.IntegrityError as error:
             if "events.event_id" not in str(error):
                 raise

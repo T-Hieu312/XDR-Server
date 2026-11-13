@@ -197,7 +197,8 @@ Sau khi đăng nhập, API dùng bearer session token; dashboard tự xử lý �
 ## 4. Sự kiện, cảnh báo và API
 
 - EDR gửi batch tới `POST /api/events/batch`. XDR chuẩn hóa và lưu sự kiện; Sysmon record đã nhận trước đó được nhận diện là trùng.
-- Event khớp `rules/detection_rules.json` mới tạo cảnh báo. Sự kiện thông thường vẫn được lưu dù không khớp rule.
+- Event khớp `rules/detection_rules.json` (rule) hoặc `rules/ioc.json` (IP, domain, hash SHA256/MD5) mới tạo cảnh báo ngay. Sự kiện thông thường vẫn được lưu dù không khớp. Rule hỗ trợ điều kiện trên field Sysmon, ví dụ `"data.CommandLine": {"contains_any": ["-enc"]}`; các toán tử: `equals`, `contains_any`, `endswith_any`, `startswith_any` (không phân biệt hoa thường).
+- AI chấm điểm hành vi theo từng host trong cửa sổ 5 phút (xem mục 4.1).
 - Dashboard hiển thị sự kiện, host, cảnh báo và incident tại `/dashboard/`.
 - Tài liệu API tương tác: `/docs`; kiểm tra trạng thái dịch vụ: `/health`.
 - API xem dữ liệu chính: `GET /api/events`, `GET /api/alerts`, `GET /api/incidents`, `GET /api/hosts`.
@@ -213,6 +214,61 @@ Các vai trò dashboard:
 Wazuh và Suricata cũng có endpoint tiếp nhận riêng tại `/api/collectors/wazuh/events` và `/api/collectors/suricata/events`. Khóa của mỗi collector được cấu hình độc lập bằng `XDR_WAZUH_INGEST_KEY` và `XDR_SURICATA_INGEST_KEY`.
 
 > Endpoint response chỉ tạo yêu cầu chờ admin khác phê duyệt; hệ thống hiện chưa thực thi lệnh cô lập host, dừng process hoặc chặn IP trên endpoint/firewall.
+
+## 4.1. Phát hiện bất thường bằng AI
+
+Mã nguồn: `backend/ai/`. Luồng xử lý:
+
+```
+EDR (Sysmon) ─▶ events (SQLite) ─▶ gom theo host + 5 phút ─▶ 21 feature hành vi
+                                                             │
+                     Isolation Forest (bất thường tổ hợp) ───┤
+                     Novelty so với baseline p99 (hành vi mới)┘─▶ ai_score 0..1
+                                                             │
+          ai_windows ◀─ lưu kết quả       alert "ai-anomaly" ◀─ nếu bất thường
+          alert rule trong cùng cửa sổ ◀─ cập nhật ai_score + risk_score
+```
+
+- **Feature** (`ai/features.py`): số process, shell, LOLBin, command line đáng ngờ, process chạy từ thư mục người dùng ghi được, Office sinh process con; số kết nối, số IP/cổng đích, kết nối ra ngoài; số truy vấn DNS, domain khác nhau, entropy domain; file thực thi được tạo, registry Run key, truy cập LSASS; số lần đăng nhập thất bại (Wazuh). Cùng một hàm được dùng cho train, chấm điểm thời gian thực và đánh giá.
+- **Model** (`ai/detector.py`): Isolation Forest train trên dữ liệu sạch, cộng thêm điểm novelty `Σ log2((x+1)/(p99+1))` cho các feature vượt p99 của baseline (Isolation Forest không phản ứng được với feature luôn bằng 0 lúc train, ví dụ truy cập LSASS). Ngưỡng của cả hai thành phần được hiệu chỉnh theo `--target-fpr` (mặc định 1% cửa sổ baseline).
+- **Giải thích**: mỗi kết quả kèm `top_features` (feature vượt baseline nhiều nhất) và gợi ý kỹ thuật MITRE ATT&CK.
+- **Chạy nền**: server tự chấm các cửa sổ đã đóng mỗi `XDR_AI_INTERVAL_SECONDS` giây (mặc định 60). Khi chưa có model, AI tự tắt và hệ thống vẫn chạy bình thường.
+
+### Train và đánh giá model
+
+1. Cài Sysmon, chạy EDR agent trên các máy Windows và dùng máy bình thường trong vài ngày để thu baseline sạch (tối thiểu 50 cửa sổ 5 phút; nên có nhiều hơn).
+2. Train (trong Docker: `docker compose exec api python -m ai.train ...`; chạy trực tiếp: tại thư mục `backend`):
+
+   ```bash
+   python -m ai.train --since 2026-11-01 --until 2026-11-06
+   ```
+
+   Cửa sổ có chứa cảnh báo rule sẽ bị loại khỏi baseline (dùng `--keep-alerted` để giữ). Model được lưu tại `XDR_AI_MODEL_PATH` (mặc định `data/ai_model.joblib`, nằm trong volume `xdr-data`). Server tự nạp lại model mới mà không cần khởi động lại.
+3. Đánh giá trên dữ liệu **không dùng để train** (dữ liệu sạch của những ngày sau, cùng dữ liệu tấn công như OTRF Security-Datasets hoặc Atomic Red Team chạy trong lab):
+
+   ```bash
+   python -m ai.evaluate --benign-db data/xdr.sqlite3 --since 2026-11-06 --until 2026-11-08 \
+       --attack /path/to/otrf/*.zip --report data/ai_evaluation.json
+   ```
+
+   Kết quả gồm precision, recall, F1, FPR, ROC-AUC, PR-AUC và số cửa sổ tấn công do từng thành phần (Isolation Forest hoặc novelty) phát hiện. File OTRF, file Get-WinEvent export và `spool.jsonl` của EDR đều đọc được; event được lọc giống như EDR agent (Sysmon 1, 3, 10 chỉ với lsass, 11, 13, 22).
+
+API: `GET /api/ai/status`, `GET /api/ai/windows?anomalies_only=true`, `POST /api/ai/analyze` (chấm ngay, quyền admin/analyst).
+
+Dashboard: mục **AI phát hiện** hiển thị trạng thái model, biểu đồ AI score theo cửa sổ, bảng cửa sổ kèm lý do (bấm vào một dòng để so sánh từng feature với baseline p99) và các alert đã được AI chấm điểm.
+
+### Demo nhanh (dữ liệu tổng hợp)
+
+Để xem trang AI khi chưa có máy Windows chạy EDR, tạo database và model **riêng cho demo** (không đụng tới dữ liệu thật). Không dùng kết quả demo làm số liệu đánh giá:
+
+```bash
+cd backend
+python -m ai.demo
+```
+
+Lệnh in ra câu lệnh khởi động server trỏ vào `data/demo.sqlite3` và `data/demo_model.joblib` (đăng nhập `admin` / `demo-password-123`).
+
+Biến môi trường: `XDR_AI_ENABLED` (mặc định `1`), `XDR_AI_MODEL_PATH`, `XDR_AI_INTERVAL_SECONDS` (60), `XDR_AI_LOOKBACK_MINUTES` (120), `XDR_AI_GRACE_SECONDS` (120: thời gian chờ event đến muộn trước khi chấm một cửa sổ). Event đến muộn hơn khi cửa sổ đã được chấm sẽ không được chấm lại.
 
 ## 5. Xử lý sự cố thường gặp
 

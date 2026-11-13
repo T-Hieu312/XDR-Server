@@ -25,5 +25,99 @@
     "confidence": 0.8,
     "mitre_attack": ["T1110"],
     "conditions": {}
+  },
+  {
+    "id": "edr-encoded-powershell",
+    "name": "PowerShell encoded command",
+    "event_type": "process_create",
+    "severity": "high",
+    "confidence": 0.85,
+    "mitre_attack": ["T1059.001", "T1027"],
+    "conditions": {
+      "data.Image": {"endswith_any": ["\\powershell.exe", "\\pwsh.exe"]},
+      "data.CommandLine": {"contains_any": [" -enc ", " -e ", "-encodedcommand", "frombase64string"]}
+    }
+  },
+  {
+    "id": "edr-powershell-download",
+    "name": "PowerShell download cradle",
+    "event_type": "process_create",
+    "severity": "high",
+    "confidence": 0.85,
+    "mitre_attack": ["T1059.001", "T1105"],
+    "conditions": {
+      "data.Image": {"endswith_any": ["\\powershell.exe", "\\pwsh.exe"]},
+      "data.CommandLine": {"contains_any": ["downloadstring", "downloadfile", "invoke-webrequest", "iwr ", "start-bitstransfer", "net.webclient"]}
+    }
+  },
+  {
+    "id": "edr-certutil-download",
+    "name": "Certutil used to download or decode a file",
+    "event_type": "process_create",
+    "severity": "high",
+    "confidence": 0.85,
+    "mitre_attack": ["T1105", "T1140"],
+    "conditions": {
+      "data.Image": {"endswith_any": ["\\certutil.exe"]},
+      "data.CommandLine": {"contains_any": ["-urlcache", "/urlcache", "-decode", "/decode"]}
+    }
+  },
+  {
+    "id": "edr-office-spawns-shell",
+    "name": "Office application spawned a shell or script host",
+    "event_type": "process_create",
+    "severity": "high",
+    "confidence": 0.8,
+    "mitre_attack": ["T1566.001", "T1204.002"],
+    "conditions": {
+      "data.ParentImage": {"endswith_any": ["\\winword.exe", "\\excel.exe", "\\powerpnt.exe", "\\outlook.exe"]},
+      "data.Image": {"endswith_any": ["\\cmd.exe", "\\powershell.exe", "\\pwsh.exe", "\\wscript.exe", "\\cscript.exe", "\\mshta.exe"]}
+    }
+  },
+  {
+    "id": "edr-schtasks-create",
+    "name": "Scheduled task created or modified",
+    "event_type": "process_create",
+    "severity": "medium",
+    "confidence": 0.7,
+    "mitre_attack": ["T1053.005"],
+    "conditions": {
+      "data.Image": {"endswith_any": ["\\schtasks.exe"]},
+      "data.CommandLine": {"contains_any": ["/create", "/change"]}
+    }
+  },
+  {
+    "id": "edr-discovery-command",
+    "name": "Account or system discovery command",
+    "event_type": "process_create",
+    "severity": "low",
+    "confidence": 0.5,
+    "mitre_attack": ["T1033", "T1087", "T1082"],
+    "conditions": {
+      "data.Image": {"endswith_any": ["\\whoami.exe", "\\net.exe", "\\net1.exe", "\\systeminfo.exe", "\\nltest.exe", "\\quser.exe"]}
+    }
+  },
+  {
+    "id": "edr-lsass-access",
+    "name": "Process opened LSASS with credential-dumping access rights",
+    "event_type": "process_access",
+    "severity": "high",
+    "confidence": 0.7,
+    "mitre_attack": ["T1003.001"],
+    "conditions": {
+      "data.TargetImage": {"endswith_any": ["\\lsass.exe"]},
+      "data.GrantedAccess": {"equals": ["0x1010", "0x1410", "0x1438", "0x143a", "0x1fffff"]}
+    }
+  },
+  {
+    "id": "edr-run-key-persistence",
+    "name": "Registry Run key modified",
+    "event_type": "registry_set",
+    "severity": "medium",
+    "confidence": 0.7,
+    "mitre_attack": ["T1547.001"],
+    "conditions": {
+      "data.TargetObject": {"contains_any": ["\\currentversion\\run\\", "\\currentversion\\runonce\\"]}
+    }
   }
 ]
