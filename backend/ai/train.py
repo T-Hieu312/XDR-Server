@@ -23,7 +23,8 @@ def alerted_event_ids(db_path: Path) -> set[str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train the XDR Isolation Forest on benign windows")
-    parser.add_argument("--db", type=Path, help="XDR SQLite database (default: XDR_DATABASE_PATH)")
+    parser.add_argument("--db", type=Path, nargs="*", default=None,
+                        help="One or more XDR SQLite databases (default: XDR_DATABASE_PATH)")
     parser.add_argument("--since", help="ISO start of the clean baseline period (inclusive)")
     parser.add_argument("--until", help="ISO end of the clean baseline period (exclusive)")
     parser.add_argument("--hosts", nargs="*", help="Only use these host_ids")
@@ -37,18 +38,19 @@ def main() -> None:
     args = parser.parse_args()
 
     events = load_files(args.files)
-    db_path = args.db or (get_database_path() if not args.files else None)
-    if db_path is not None:
+    db_paths = args.db if args.db else ([] if args.files else [get_database_path()])
+    alerted: set[str] = set()
+    for db_path in db_paths:
         if not Path(db_path).exists():
             raise SystemExit(f"Database not found: {db_path}")
         events.extend(iter_db_events(db_path, args.since, args.until, args.hosts))
+        alerted |= alerted_event_ids(Path(db_path))
     if not events:
         raise SystemExit("No events found for training")
 
     windows = group_windows(events)
     dropped = 0
-    if db_path is not None and not args.keep_alerted:
-        alerted = alerted_event_ids(Path(db_path))
+    if alerted and not args.keep_alerted:
         clean = {}
         for key, window_events in windows.items():
             if any(str(event.get("event_id")) in alerted for event in window_events):
