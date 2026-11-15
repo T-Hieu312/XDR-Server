@@ -233,6 +233,20 @@ def list_events(limit: int = 100) -> list[dict[str, Any]]:
     return [_event_dict(row) for row in rows]
 
 
+def count_events_in_window(
+    host_id: str, event_type: str, source: str, start_time: str, end_time: str
+) -> int:
+    with db_session() as connection:
+        row = connection.execute(
+            """SELECT COUNT(*) FROM events
+            WHERE host_id = ? AND event_type = ? AND source = ?
+            AND julianday(timestamp) >= julianday(?)
+            AND julianday(timestamp) <= julianday(?)""",
+            (host_id, event_type, source, start_time, end_time),
+        ).fetchone()
+    return int(row[0])
+
+
 def list_alerts(status: str | None = None) -> list[dict[str, Any]]:
     query = "SELECT * FROM alerts"
     parameters: tuple[str, ...] = ()

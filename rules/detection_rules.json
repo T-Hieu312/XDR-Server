@@ -10,20 +10,60 @@
   },
   {
     "id": "suricata-et-alert",
-    "name": "Suricata network alert",
+    "name": "Suricata high or medium severity signature alert",
     "event_type": "network_alert",
     "severity": "high",
     "confidence": 0.85,
     "mitre_attack": ["T1071"],
-    "conditions": {}
+    "conditions": {
+      "alert.signature": {"exists": true},
+      "alert.severity": {"lte": 2}
+    }
   },
   {
-    "id": "wazuh-auth-failure-burst",
-    "name": "Server authentication failure burst",
-    "event_type": "authentication_failure",
+    "id": "sysmon-powershell-encoded-command",
+    "name": "Encoded PowerShell command",
+    "event_type": "process_create",
+    "severity": "high",
+    "confidence": 0.9,
+    "mitre_attack": ["T1059.001", "T1027"],
+    "conditions": {
+      "data.Image": {"endswith": "\\powershell.exe"},
+      "data.CommandLine": {"contains_any": ["-enc", "-encodedcommand", "frombase64string"]}
+    }
+  },
+  {
+    "id": "sysmon-powershell-download-cradle",
+    "name": "PowerShell download cradle",
+    "event_type": "process_create",
+    "severity": "high",
+    "confidence": 0.85,
+    "mitre_attack": ["T1059.001", "T1105"],
+    "conditions": {
+      "data.Image": {"endswith": "\\powershell.exe"},
+      "data.CommandLine": {"contains_any": ["downloadstring", "invoke-webrequest", " iwr ", "start-bitstransfer"]}
+    }
+  },
+  {
+    "id": "sysmon-lsass-process-access",
+    "name": "Process accessed LSASS",
+    "event_type": "process_access",
+    "severity": "high",
+    "confidence": 0.9,
+    "mitre_attack": ["T1003.001"],
+    "conditions": {
+      "data.TargetImage": {"endswith": "\\lsass.exe"}
+    }
+  },
+  {
+    "id": "sysmon-registry-run-key-persistence",
+    "name": "Autorun registry key modified",
+    "event_type": "registry_set",
     "severity": "medium",
-    "confidence": 0.8,
-    "mitre_attack": ["T1110"],
-    "conditions": {}
+    "confidence": 0.75,
+    "mitre_attack": ["T1060", "T1547.001"],
+    "conditions": {
+      "data.TargetObject": {"regex": "\\\\Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Run(Once)?\\\\"}
+    }
   }
 ]

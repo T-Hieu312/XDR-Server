@@ -47,10 +47,10 @@ Tạo file `.env` tại thư mục này. Dùng mật khẩu quản trị dài í
 ```dotenv
 XDR_BOOTSTRAP_ADMIN_USERNAME=admin
 XDR_BOOTSTRAP_ADMIN_PASSWORD=THAY_BANG_MAT_KHAU_DAI_IT_NHAT_12_KY_TU
-XDR_AGENT_KEY=THAY_BANG_KHOA_NGAU_NHIEN_DUNG_CHUNG_VOI_EDR
+XDR_AGENT_KEYS={"DESKTOP-01":"THAY_BANG_KHOA_NGAU_NHIEN_RIENG_CHO_AGENT_NAY"}
 ```
 
-Có thể tạo khóa ngẫu nhiên bằng `openssl rand -hex 32`, rồi đặt cùng giá trị vào `XDR_AGENT_KEY` và `agent.agent_key` trong cấu hình EDR. Giữ file `.env` và khóa bí mật, không đưa chúng lên Git:
+Tạo khóa riêng cho từng endpoint bằng `openssl rand -hex 32`. `XDR_AGENT_KEYS` là JSON map từ `agent_id` sang khóa; `agent_id` phải khớp `agent.agent_id` của EDR. Giữ file `.env` và khóa bí mật, không đưa chúng lên Git. `XDR_AGENT_KEY` vẫn được hỗ trợ tạm thời như khóa dùng chung cũ nếu chưa cấu hình map:
 
 ```bash
 chmod 600 .env
@@ -118,7 +118,7 @@ python -m pip install -r requirements.txt
 ```bash
 export XDR_BOOTSTRAP_ADMIN_USERNAME=admin
 export XDR_BOOTSTRAP_ADMIN_PASSWORD='THAY_BANG_MAT_KHAU_DAI_IT_NHAT_12_KY_TU'
-export XDR_AGENT_KEY='THAY_BANG_KHOA_NGAU_NHIEN_DUNG_CHUNG_VOI_EDR'
+export XDR_AGENT_KEYS='{"DESKTOP-01":"THAY_BANG_KHOA_NGAU_NHIEN_RIENG_CHO_AGENT_NAY"}'
 ```
 
 Khởi động backend:
@@ -162,13 +162,13 @@ Mở `config.yaml` và cập nhật các trường sau:
 ```yaml
 agent:
   agent_id: ""
-  agent_key: "THAY_BANG_DUNG_GIA_TRI_XDR_AGENT_KEY"
+  agent_key: "THAY_BANG_KHOA_RIENG_DUOC_KHAI_BAO_TREN_XDR_AGENT_KEYS"
 
 sender:
   url: "http://192.168.1.10:8000/api/events/batch"
 ```
 
-- `agent_key` phải khớp chính xác với `XDR_AGENT_KEY` trên Ubuntu.
+- `agent_key` phải khớp với giá trị trong `XDR_AGENT_KEYS` ứng với `agent_id`; nếu dùng khóa dùng chung cũ, nó phải khớp `XDR_AGENT_KEY`.
 - Thay `192.168.1.10` bằng IP Ubuntu Server; không dùng `127.0.0.1` nếu EDR và XDR ở hai máy khác nhau.
 - Để `agent_id` trống, agent sẽ dùng hostname Windows.
 - Không sử dụng khóa mẫu `A19-EDR-DEMO-KEY` trong môi trường thật.
@@ -197,7 +197,7 @@ Sau khi đăng nhập, API dùng bearer session token; dashboard tự xử lý �
 ## 4. Sự kiện, cảnh báo và API
 
 - EDR gửi batch tới `POST /api/events/batch`. XDR chuẩn hóa và lưu sự kiện; Sysmon record đã nhận trước đó được nhận diện là trùng.
-- Event khớp `rules/detection_rules.json` mới tạo cảnh báo. Sự kiện thông thường vẫn được lưu dù không khớp rule.
+- Event khớp `rules/detection_rules.json` mới tạo cảnh báo. Rule hỗ trợ điều kiện trên trường lồng nhau trong `raw` (ví dụ `data.CommandLine`) với `contains`, `contains_any`, `endswith` và `regex`; các rule Sysmon mẫu phát hiện PowerShell mã hóa/tải nội dung, truy cập LSASS và sửa Run key. Sự kiện thông thường vẫn được lưu dù không khớp rule.
 - Dashboard hiển thị sự kiện, host, cảnh báo và incident tại `/dashboard/`.
 - Tài liệu API tương tác: `/docs`; kiểm tra trạng thái dịch vụ: `/health`.
 - API xem dữ liệu chính: `GET /api/events`, `GET /api/alerts`, `GET /api/incidents`, `GET /api/hosts`.
@@ -210,6 +210,10 @@ Các vai trò dashboard:
 | `analyst` | Xem sự kiện; xem và cập nhật cảnh báo/incident. |
 | `viewer` | Chỉ đọc sự kiện, cảnh báo, incident và host. |
 
+Collector EDR chỉ nhận event Sysmon có ID/type khớp, `data` dạng object và `record_id`; request tối đa 2 MiB, batch tối đa 500 event. Có thể cấu hình khóa riêng bằng `XDR_AGENT_KEYS` dạng JSON, ví dụ `{"DESKTOP-01":"secret"}`; khóa map được ưu tiên hơn biến dùng chung cũ `XDR_AGENT_KEY`.
+
+Rule Suricata chỉ tạo alert cho event có `alert.signature` và severity 1 hoặc 2. Wazuh tạo alert burst khi có 5 event `authentication_failure` từ cùng host trong 5 phút. IOC trong `rules/ioc.json` được dò trên raw event: IP hỗ trợ CIDR, domain khớp chính xác hoặc subdomain, hash khớp SHA-256/SHA-1/MD5.
+
 Wazuh và Suricata cũng có endpoint tiếp nhận riêng tại `/api/collectors/wazuh/events` và `/api/collectors/suricata/events`. Khóa của mỗi collector được cấu hình độc lập bằng `XDR_WAZUH_INGEST_KEY` và `XDR_SURICATA_INGEST_KEY`.
 
 > Endpoint response chỉ tạo yêu cầu chờ admin khác phê duyệt; hệ thống hiện chưa thực thi lệnh cô lập host, dừng process hoặc chặn IP trên endpoint/firewall.
@@ -219,8 +223,8 @@ Wazuh và Suricata cũng có endpoint tiếp nhận riêng tại `/api/collector
 | Triệu chứng | Kiểm tra |
 |---|---|
 | Không mở được dashboard/API từ Windows | Kiểm tra IP Ubuntu, kết nối LAN/VPN, trạng thái container/service và firewall TCP `8000`. |
-| Agent báo HTTP `401` | `agent.agent_key` trong `config.yaml` không khớp `XDR_AGENT_KEY` trên XDR. |
-| Agent báo HTTP `503` | XDR chưa được cấu hình `XDR_AGENT_KEY` hoặc cần khởi động lại sau khi đặt biến. |
+| Agent báo HTTP `401` | `agent.agent_id` không có trong `XDR_AGENT_KEYS`, hoặc khóa agent không khớp; nếu dùng khóa cũ, kiểm tra `XDR_AGENT_KEY`. |
+| Agent báo HTTP `503` | XDR chưa được cấu hình `XDR_AGENT_KEYS` hoặc khóa dùng chung `XDR_AGENT_KEY`; khởi động lại sau khi đặt biến. |
 | Không thấy event | Xác nhận Sysmon đang chạy và có event mới trong kênh Operational; xem log agent và kiểm tra URL. |
 | XDR dừng khi SSH ngắt | Chạy XDR bằng Docker Compose hoặc cấu hình native backend thành service `systemd`. |
 | Mất kết nối tạm thời | EDR thử gửi lại; batch không gửi được được lưu trong `spool.jsonl` để thử gửi lại sau. |

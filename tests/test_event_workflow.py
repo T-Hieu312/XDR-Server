@@ -297,6 +297,38 @@ def test_edr_batch_requires_valid_agent_key(
     assert response.status_code == 401
 
 
+def test_edr_batch_uses_per_agent_keys_and_validates_sysmon_identity(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDR_AGENT_KEYS", '{"agent-01":"agent-secret"}')
+    headers = {"X-Agent-Id": "agent-01", "X-Agent-Key": "agent-secret"}
+    event = {
+        "source": "sysmon",
+        "sysmon_event_id": 1,
+        "event_type": "process_create",
+        "record_id": "2345",
+        "computer": "endpoint-01",
+        "data": {"Image": r"C:\Windows\notepad.exe"},
+    }
+
+    accepted = client.post("/api/events/batch", json=[event], headers=headers)
+    invalid = client.post(
+        "/api/events/batch",
+        json=[{**event, "record_id": "2346", "sysmon_event_id": 3}],
+        headers=headers,
+    )
+    unauthorized = client.post(
+        "/api/events/batch",
+        json=[event],
+        headers={**headers, "X-Agent-Key": "wrong-secret"},
+    )
+
+    assert accepted.status_code == 200
+    assert accepted.json() == {"received": 1, "duplicates": 0}
+    assert invalid.status_code == 422
+    assert unauthorized.status_code == 401
+
+
 def test_wazuh_alerts_are_ingested_normalized_and_deduplicated(client: TestClient) -> None:
     headers = {"X-Collector-Key": "test-wazuh-secret"}
     alert = {
@@ -333,6 +365,35 @@ def test_wazuh_alerts_are_ingested_normalized_and_deduplicated(client: TestClien
     )
     assert replay.status_code == 200
     assert replay.json() == {"received": 0, "duplicates": 1}
+
+
+def test_wazuh_authentication_failure_burst_creates_alert(client: TestClient) -> None:
+    headers = {"X-Collector-Key": "test-wazuh-secret"}
+    responses = []
+    for index in range(5):
+        alert = {
+            "id": f"wazuh-brute-force-{index}",
+            "timestamp": f"2026-11-02T10:0{index}:00Z",
+            "agent": {"id": "001", "name": "server-01"},
+            "rule": {
+                "id": "5710",
+                "level": 10,
+                "description": "sshd: authentication failed",
+                "groups": ["authentication_failed"],
+            },
+        }
+        responses.append(
+            client.post(
+                "/api/collectors/wazuh/events",
+                headers=headers,
+                json={"alerts": [alert]},
+            )
+        )
+
+    assert all(response.status_code == 200 for response in responses)
+    alerts = client.get("/api/alerts").json()
+    assert len(alerts) == 1
+    assert alerts[0]["rule_id"] == "wazuh-auth-failure-burst"
 
 
 def test_suricata_eve_is_ingested_normalized_and_deduplicated(client: TestClient) -> None:
