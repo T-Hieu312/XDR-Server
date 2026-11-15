@@ -203,7 +203,10 @@ def test_event_creates_alert_incident_and_host_summary(client: TestClient) -> No
     assert len(result["alerts"]) == 1
     alert = result["alerts"][0]
     assert alert["severity"] == "high"
-    assert alert["risk_score"] == 70
+    # severity high (70) x rule confidence 0.9; the AI score is added later when
+    # the host's 5-minute window is analysed (see tests/test_ai.py).
+    assert alert["risk_score"] == 63
+    assert alert["ai_score"] == 0.0
     assert alert["incident_id"] == result["incident_id"]
 
     assert client.get("/api/events").json()[0]["event_type"] == "suspicious_process"

@@ -8,9 +8,8 @@ from pydantic import ValidationError
 from api.agent_auth import authenticate_agent
 from database.database import list_events as fetch_events
 from database.database import save_event_with_alerts
-from detection.anomaly_engine import anomaly_score
+from ingestion import detect_event, load_detection_content
 from api.security import require_roles
-from ingestion import detect_event
 from models.event import Event
 
 router = APIRouter(prefix="/api/events", tags=["events"])
@@ -40,10 +39,10 @@ def ingest_event(
     event: Event, _: dict[str, Any] = Depends(require_roles("admin", "analyst"))
 ) -> dict[str, Any]:
     event_data = event.model_dump(mode="json")
-    matched_rules = detect_event(event_data)
-    ai_score = anomaly_score(event_data)
+    rules, iocs = load_detection_content()
+    matched_rules = detect_event(event_data, rules, iocs)
     try:
-        return save_event_with_alerts(event_data, matched_rules, ai_score)
+        return save_event_with_alerts(event_data, matched_rules)
     except sqlite3.IntegrityError as error:
         raise HTTPException(status_code=409, detail="An event with this event_id already exists") from error
 
@@ -82,6 +81,9 @@ async def ingest_edr_batch(
     if len(events) > MAX_EDR_BATCH_SIZE:
         raise HTTPException(status_code=413, detail=f"Event batch exceeds {MAX_EDR_BATCH_SIZE} events")
 
+    accepted = 0
+    duplicates = 0
+    rules, iocs = load_detection_content()
     normalized_events: list[dict[str, Any]] = []
     for raw_event in events:
         if not isinstance(raw_event, dict):
@@ -124,15 +126,9 @@ async def ingest_edr_batch(
             raise HTTPException(status_code=422, detail=error.errors()) from error
         normalized_events.append(event.model_dump(mode="json"))
 
-    accepted = 0
-    duplicates = 0
     for event_data in normalized_events:
         try:
-            save_event_with_alerts(
-                event_data,
-                detect_event(event_data),
-                anomaly_score(event_data),
-            )
+            save_event_with_alerts(event_data, detect_event(event_data, rules, iocs))
         except sqlite3.IntegrityError as error:
             if "events.event_id" not in str(error):
                 raise

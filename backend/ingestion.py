@@ -7,21 +7,30 @@ from pydantic import ValidationError
 
 from correlation.correlator import correlated_detection_rules
 from database.database import save_event_with_alerts
-from detection.anomaly_engine import anomaly_score
 from detection.ioc_engine import load_iocs, match_iocs
 from detection.rule_engine import load_default_rules, match_event
 from models.event import Event
 
 
+def load_detection_content() -> tuple[list[dict[str, Any]], dict[str, set[str]]]:
+    return load_default_rules(), load_iocs()
+
+
 def detect_event(
-    event: dict[str, Any],
+    event_data: dict[str, Any],
     rules: list[dict[str, Any]] | None = None,
-    iocs: dict[str, Any] | None = None,
+    iocs: dict[str, set[str]] | None = None,
 ) -> list[dict[str, Any]]:
-    matched_rules = match_event(event, rules if rules is not None else load_default_rules())
-    matched_rules.extend(match_iocs(event, iocs if iocs is not None else load_iocs()))
-    matched_rules.extend(correlated_detection_rules(event))
-    return matched_rules
+    """Per-event detection: rule matches plus IOC matches.
+
+    AI scoring is not done here: the model scores whole host/time windows
+    after they close (ai.analyzer) and then enriches these alerts' ai_score.
+    """
+    if rules is None or iocs is None:
+        rules, iocs = load_detection_content()
+    matches = match_event(event_data, rules) + match_iocs(event_data, iocs)
+    matches.extend(correlated_detection_rules(event_data))
+    return matches
 
 
 def ingest_normalized_events(events: list[dict[str, Any]], source: str) -> dict[str, int]:
@@ -38,15 +47,10 @@ def ingest_normalized_events(events: list[dict[str, Any]], source: str) -> dict[
 
     accepted = 0
     duplicates = 0
-    rules = load_default_rules()
-    iocs = load_iocs()
+    rules, iocs = load_detection_content()
     for event_data in validated_events:
         try:
-            save_event_with_alerts(
-                event_data,
-                detect_event(event_data, rules, iocs),
-                anomaly_score(event_data),
-            )
+            save_event_with_alerts(event_data, detect_event(event_data, rules, iocs))
         except sqlite3.IntegrityError as error:
             if "events.event_id" not in str(error):
                 raise

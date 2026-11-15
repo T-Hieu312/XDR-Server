@@ -20,7 +20,7 @@ def test_sysmon_rules_match_nested_fields_case_insensitively() -> None:
 
     matches = match_event(event, load_default_rules())
 
-    assert [rule["id"] for rule in matches] == ["sysmon-powershell-encoded-command"]
+    assert [rule["id"] for rule in matches] == ["edr-encoded-powershell"]
 
 
 def test_ioc_matching_supports_cidr_domains_and_hashes() -> None:

@@ -10,7 +10,32 @@ const SEVERITIES = [
   { name: "Low", color: "#55d6a0" },
   { name: "Info", color: "#68b6e8" },
 ];
-const state = { events: [], alerts: [], hosts: [], incidents: [], loading: false };
+const AI_FEATURE_LABELS = {
+  process_count: "Số process được tạo",
+  unique_process_images: "Số chương trình khác nhau",
+  shell_process_count: "PowerShell / cmd",
+  lolbin_process_count: "LOLBin (certutil, rundll32...)",
+  suspicious_cmdline_count: "Command line đáng ngờ",
+  max_cmdline_length: "Command line dài nhất",
+  user_writable_exec_count: "Chạy từ Temp/AppData/Public",
+  office_spawn_count: "Office sinh process con",
+  network_connect_count: "Số kết nối mạng",
+  unique_dst_ip: "Số IP đích khác nhau",
+  unique_dst_port: "Số cổng đích khác nhau",
+  external_connection_count: "Kết nối ra Internet",
+  dns_query_count: "Số truy vấn DNS",
+  unique_domains: "Số domain khác nhau",
+  max_domain_entropy: "Entropy domain (DGA)",
+  file_create_count: "Số file được tạo",
+  executable_file_create_count: "File thực thi được tạo",
+  registry_set_count: "Số lần ghi registry",
+  persistence_registry_count: "Ghi Run key / Services",
+  lsass_access_count: "Truy cập LSASS",
+  auth_failure_count: "Đăng nhập thất bại",
+};
+const state = {
+  events: [], alerts: [], hosts: [], incidents: [], aiStatus: null, aiWindows: [], loading: false,
+};
 let apiKey = "";
 let authGeneration = 0;
 let currentUser = null;
@@ -113,6 +138,7 @@ async function authenticateDashboard(event) {
     byId("logout-button").hidden = false;
     byId("user-management-button").hidden = currentUser.role !== "admin";
     byId("response-management-button").hidden = currentUser.role !== "admin";
+    byId("ai-analyze-button").hidden = !["admin", "analyst"].includes(currentUser.role);
     byId("avatar").textContent = currentUser.username.slice(0, 2).toUpperCase();
     byId("avatar").title = `${currentUser.username} · ${currentUser.role}`;
     byId("api-state").textContent = `${currentUser.username} · ${currentUser.role}`;
@@ -132,6 +158,8 @@ function logoutDashboard(message = "") {
   state.alerts = [];
   state.hosts = [];
   state.incidents = [];
+  state.aiStatus = null;
+  state.aiWindows = [];
   render();
   byId("api-state").textContent = "Chưa đăng nhập";
   byId("last-updated").textContent = "Chưa đồng bộ";
@@ -139,6 +167,7 @@ function logoutDashboard(message = "") {
   byId("logout-button").hidden = true;
   byId("user-management-button").hidden = true;
   byId("response-management-button").hidden = true;
+  byId("ai-analyze-button").hidden = true;
   byId("avatar").textContent = "XA";
   byId("avatar").title = "XDR analyst";
   if (byId("users-dialog").open) byId("users-dialog").close();
@@ -493,6 +522,199 @@ function renderIncidents() {
   }).join("");
 }
 
+function showToast(message) {
+  const toast = byId("toast");
+  toast.textContent = message;
+  toast.classList.add("visible");
+  window.clearTimeout(showToast.timer);
+  showToast.timer = window.setTimeout(() => toast.classList.remove("visible"), 4000);
+}
+
+function scoreText(value) {
+  return Number(value || 0).toFixed(2);
+}
+
+function aiScoreCell(value) {
+  const score = Math.max(0, Math.min(1, Number(value || 0)));
+  const level = score >= 0.8 ? "high" : score >= 0.5 ? "mid" : "";
+  return `<span class="ai-score"><span class="ai-score-track"><span class="ai-score-fill ${level}" style="width:${Math.round(score * 100)}%"></span></span><b>${scoreText(score)}</b></span>`;
+}
+
+function featureLabel(name) {
+  return AI_FEATURE_LABELS[name] || name;
+}
+
+function featureChips(topFeatures) {
+  if (!topFeatures || !topFeatures.length) return '<span class="ai-chip-none">Không feature nào vượt baseline</span>';
+  return `<span class="ai-chips">${topFeatures.map((item) =>
+    `<span class="ai-chip" title="${escapeHtml(item.feature)}: ${escapeHtml(item.value)} (baseline p99 ${escapeHtml(item.baseline_p99)})">${escapeHtml(featureLabel(item.feature))}: ${escapeHtml(item.value)}</span>`).join("")}</span>`;
+}
+
+function formatWindow(window) {
+  const start = dateValue(window.window_start);
+  const end = dateValue(window.window_end);
+  if (!start) return "Không rõ";
+  const time = (date) => date.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" });
+  return `${start.toLocaleDateString("vi-VN")} ${time(start)}–${end ? time(end) : ""}`;
+}
+
+function filteredAiWindows() {
+  const host = byId("ai-host-filter").value;
+  const anomaliesOnly = byId("ai-anomaly-filter").checked;
+  return state.aiWindows.filter((window) =>
+    (host === "all" || window.host_id === host) && (!anomaliesOnly || window.is_anomaly));
+}
+
+function renderAiStatus() {
+  const status = state.aiStatus;
+  const tag = byId("ai-state-tag");
+  const enabled = Boolean(status && status.enabled);
+  tag.className = `panel-tag ${enabled ? "ai-on" : "ai-off"}`;
+  tag.innerHTML = `<span class="tiny-dot"></span> ${status ? (enabled ? "MODEL ĐANG HOẠT ĐỘNG" : "CHƯA CÓ MODEL") : "KHÔNG TẢI ĐƯỢC"}`;
+  byId("ai-setup").hidden = !status || enabled;
+  byId("ai-model-version").textContent = enabled ? status.version : "Chưa train";
+  byId("ai-model-trained").textContent = enabled ? `Train lúc ${formatDate(status.trained_at)}` : "AI đang tắt";
+  byId("ai-training-windows").textContent = enabled ? numberFormat.format(status.training_windows) : "—";
+  byId("ai-training-caption").textContent = enabled
+    ? `cửa sổ · FPR mục tiêu ${(status.target_fpr * 100).toFixed(1)}% · ${(status.hosts || []).length} host`
+    : "cửa sổ dùng để train";
+  const anomalies = state.aiWindows.filter((window) => window.is_anomaly).length;
+  byId("ai-window-count").textContent = numberFormat.format(state.aiWindows.length);
+  byId("ai-anomaly-count").textContent = numberFormat.format(anomalies);
+  byId("ai-anomaly-caption").textContent = state.aiWindows.length
+    ? `${((anomalies / state.aiWindows.length) * 100).toFixed(1)}% số cửa sổ đã chấm`
+    : "cửa sổ vượt ngưỡng";
+}
+
+function renderAiTimeline() {
+  const windows = state.aiWindows.slice(0, 72).reverse();
+  if (!windows.length) {
+    byId("ai-timeline").innerHTML = '<span class="empty-row">Chưa có cửa sổ nào được chấm.</span>';
+    return;
+  }
+  byId("ai-timeline").innerHTML = windows.map((window, index) => {
+    const height = Math.max(3, Math.round(Number(window.ai_score || 0) * 100));
+    const title = `${window.host_id} · ${formatWindow(window)} · AI ${scoreText(window.ai_score)}`;
+    return `<span class="ai-bar ${window.is_anomaly ? "anomaly" : ""}" data-ai-bar="${index}" style="height:${height}%" title="${escapeHtml(title)}"></span>`;
+  }).join("");
+  byId("ai-timeline").querySelectorAll("[data-ai-bar]").forEach((bar) => {
+    bar.addEventListener("click", () => showAiWindow(windows[Number(bar.dataset.aiBar)]));
+  });
+}
+
+function renderAiWindows() {
+  const hostFilter = byId("ai-host-filter");
+  const selected = hostFilter.value;
+  const hosts = [...new Set(state.aiWindows.map((window) => window.host_id))].sort();
+  hostFilter.innerHTML = '<option value="all">Tất cả host</option>' + hosts.map((host) =>
+    `<option value="${escapeHtml(host)}">${escapeHtml(host)}</option>`).join("");
+  hostFilter.value = hosts.includes(selected) ? selected : "all";
+
+  const windows = filteredAiWindows();
+  if (!windows.length) {
+    const message = state.aiWindows.length ? "Không có cửa sổ phù hợp bộ lọc." : "Chưa có kết quả AI.";
+    byId("ai-windows-body").innerHTML = `<tr><td colspan="6" class="empty-row">${message}</td></tr>`;
+    return;
+  }
+  byId("ai-windows-body").innerHTML = windows.slice(0, 15).map((window, index) => `
+    <tr data-event-row data-ai-window="${index}">
+      <td><span class="event-name">${escapeHtml(window.host_id)}</span><span class="event-id">${escapeHtml(window.model_version)}</span></td>
+      <td class="time-cell">${escapeHtml(formatWindow(window))}</td>
+      <td>${numberFormat.format(window.event_count)}</td>
+      <td>${aiScoreCell(window.ai_score)}</td>
+      <td>${featureChips(window.top_features)}</td>
+      <td><span class="status-pill ${window.is_anomaly ? "ai-verdict-anomaly" : "ai-verdict-normal"}">${window.is_anomaly ? "Bất thường" : "Bình thường"}</span></td>
+    </tr>`).join("");
+  byId("ai-windows-body").querySelectorAll("[data-ai-window]").forEach((row) => {
+    row.addEventListener("click", () => showAiWindow(windows[Number(row.dataset.aiWindow)]));
+  });
+}
+
+function renderAiAlerts() {
+  const alerts = state.alerts
+    .filter((alert) => alert.rule_id === "ai-anomaly" || Number(alert.ai_score) > 0)
+    .sort((left, right) => Number(right.ai_score) - Number(left.ai_score));
+  if (!alerts.length) {
+    byId("ai-alerts-body").innerHTML = '<tr><td colspan="6" class="empty-row">Chưa có alert nào được AI chấm điểm.</td></tr>';
+    return;
+  }
+  byId("ai-alerts-body").innerHTML = alerts.slice(0, 12).map((alert) => {
+    const severity = normalizedSeverity(alert.severity);
+    const status = String(alert.status || "open").toLowerCase();
+    const source = alert.rule_id === "ai-anomaly" ? "AI" : `Rule · ${alert.rule_id}`;
+    return `<tr>
+      <td><span class="event-name">${escapeHtml(alert.title)}</span><span class="event-id">${escapeHtml(source)}</span></td>
+      <td><span class="severity-pill severity-${severity}">${escapeHtml(severity)}</span></td>
+      <td>${aiScoreCell(alert.ai_score)}</td>
+      <td><strong>${numberFormat.format(alert.risk_score)}</strong>/100</td>
+      <td class="ai-mitre">${escapeHtml((alert.mitre_attack || []).join(", ") || "—")}</td>
+      <td><span class="status-pill status-${escapeHtml(status)}">${escapeHtml(status)}</span></td>
+    </tr>`;
+  }).join("");
+}
+
+function renderAi() {
+  renderAiStatus();
+  renderAiTimeline();
+  renderAiWindows();
+  renderAiAlerts();
+}
+
+function showAiWindow(window) {
+  if (!window) return;
+  const p99 = (state.aiStatus && state.aiStatus.feature_p99) || {};
+  byId("ai-dialog-title").textContent = `${window.host_id} · ${window.is_anomaly ? "Bất thường" : "Bình thường"}`;
+  byId("ai-dialog-meta").innerHTML = [
+    `Cửa sổ: ${escapeHtml(formatWindow(window))}`,
+    `AI score: ${escapeHtml(scoreText(window.ai_score))}`,
+    `Event: ${escapeHtml(window.event_count)}`,
+    `Model: ${escapeHtml(window.model_version)}`,
+    window.alert_id ? `Alert: ${escapeHtml(window.alert_id)}` : "Không tạo alert",
+  ].map((value) => `<span>${value}</span>`).join("");
+  byId("ai-dialog-features").innerHTML = Object.entries(window.features || {}).map(([name, value]) => {
+    const baseline = p99[name];
+    const exceeded = baseline !== undefined && Number(value) > Number(baseline);
+    return `<tr class="${exceeded ? "exceeded" : ""}">
+      <td class="ai-mitre">${escapeHtml(name)}</td>
+      <td>${escapeHtml(featureLabel(name))}</td>
+      <td><strong>${escapeHtml(value)}</strong></td>
+      <td>${baseline === undefined ? "—" : escapeHtml(Number(baseline).toFixed(2))}</td>
+    </tr>`;
+  }).join("");
+  byId("ai-dialog").showModal();
+}
+
+async function loadAiData() {
+  // AI endpoints are optional: a failure here must not break the rest of the dashboard.
+  const [status, windows] = await Promise.all([
+    apiGet("/api/ai/status").catch((error) => { if (error.status === 401) throw error; return null; }),
+    apiGet("/api/ai/windows?limit=300").catch((error) => { if (error.status === 401) throw error; return []; }),
+  ]);
+  return { status, windows };
+}
+
+async function runAiAnalysis() {
+  const button = byId("ai-analyze-button");
+  button.disabled = true;
+  try {
+    const result = await apiRequest("/api/ai/analyze", { method: "POST" });
+    if (result.status === "model_not_trained") {
+      showToast("Chưa có model AI. Hãy train model trước (python -m ai.train).");
+    } else {
+      showToast(`AI đã chấm ${result.analyzed} cửa sổ mới, phát hiện ${result.anomalies} bất thường.`);
+      await refreshDashboard();
+    }
+  } catch (error) {
+    if (error.status === 401) {
+      logoutDashboard("Phiên đăng nhập hết hạn hoặc tài khoản đã bị khóa. Đăng nhập lại.");
+    } else {
+      showToast(`Không chạy được AI: ${error.message}`);
+    }
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function render() {
   byId("metric-events").textContent = numberFormat.format(state.events.length);
   byId("metric-event-caption").textContent = `Trong ${state.events.length >= 500 ? "500 event mới nhất" : "các event đã tải"}`;
@@ -502,6 +724,7 @@ function render() {
   renderSources();
   renderEvents();
   renderIncidents();
+  renderAi();
 }
 
 function showEventDetails(event) {
@@ -526,17 +749,20 @@ async function refreshDashboard() {
   button.disabled = true;
   byId("api-state").textContent = "Đang tải dữ liệu...";
   try {
-    const [events, alerts, hosts, incidents] = await Promise.all([
+    const [events, alerts, hosts, incidents, ai] = await Promise.all([
       apiGet("/api/events?limit=500"),
       apiGet("/api/alerts"),
       apiGet("/api/hosts"),
       apiGet("/api/incidents"),
+      loadAiData(),
     ]);
     if (!apiKey || generation !== authGeneration) return;
     state.events = events;
     state.alerts = alerts;
     state.hosts = hosts;
     state.incidents = incidents;
+    state.aiStatus = ai.status;
+    state.aiWindows = ai.windows;
     byId("error-banner").hidden = true;
     byId("api-state").textContent = "Đang hoạt động";
     byId("last-updated").textContent = `Cập nhật ${new Date().toLocaleTimeString("vi-VN")}`;
@@ -575,6 +801,13 @@ byId("response-create-form").addEventListener("submit", createResponseRequest);
 byId("event-search").addEventListener("input", renderEvents);
 byId("source-filter").addEventListener("change", renderEvents);
 byId("dialog-close").addEventListener("click", () => byId("event-dialog").close());
+byId("ai-analyze-button").addEventListener("click", runAiAnalysis);
+byId("ai-host-filter").addEventListener("change", renderAiWindows);
+byId("ai-anomaly-filter").addEventListener("change", renderAiWindows);
+byId("ai-dialog-close").addEventListener("click", () => byId("ai-dialog").close());
+byId("ai-dialog").addEventListener("click", (event) => {
+  if (event.target === byId("ai-dialog")) byId("ai-dialog").close();
+});
 byId("event-dialog").addEventListener("click", (event) => {
   if (event.target === byId("event-dialog")) byId("event-dialog").close();
 });
