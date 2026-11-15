@@ -215,60 +215,69 @@ Wazuh và Suricata cũng có endpoint tiếp nhận riêng tại `/api/collector
 
 > Endpoint response chỉ tạo yêu cầu chờ admin khác phê duyệt; hệ thống hiện chưa thực thi lệnh cô lập host, dừng process hoặc chặn IP trên endpoint/firewall.
 
-## 4.1. Phát hiện bất thường bằng AI
+## 4.1. AI phát hiện và nhận diện kịch bản tấn công
 
-Mã nguồn: `backend/ai/`. Luồng xử lý:
+Mã nguồn: `backend/ai/`. AI gộp dữ liệu của **EDR (Sysmon), Wazuh và Suricata** theo từng máy trong cửa sổ 5 phút và chạy hai tầng:
 
 ```
-EDR (Sysmon) ─▶ events (SQLite) ─▶ gom theo host + 5 phút ─▶ 21 feature hành vi
-                                                             │
-                     Isolation Forest (bất thường tổ hợp) ───┤
-                     Novelty so với baseline p99 (hành vi mới)┘─▶ ai_score 0..1
-                                                             │
-          ai_windows ◀─ lưu kết quả       alert "ai-anomaly" ◀─ nếu bất thường
-          alert rule trong cùng cửa sổ ◀─ cập nhật ai_score + risk_score
+EDR ──┐                                     ┌─ Tầng 1: Isolation Forest + novelty so với baseline
+Wazuh ┼─▶ events ─▶ bảng tài sản ─▶ máy + 5 phút ─▶ 30 feature ─┤      → "có bất thường không?" (phát hiện cả tấn công chưa biết)
+Suricata┘   (rules/assets.json)                  └─ Tầng 2: Random Forest học từ các lượt tấn công có ghi giờ trong lab
+                                                        → "đó là kịch bản nào?" (brute force, RDP, SQLi, quét mạng...)
+                     │
+   alert "ai-anomaly" (tên kịch bản + MITRE) ◀─ cảnh báo nếu tầng 1 bất thường HOẶC tầng 2 nhận ra kịch bản đã biết
+   alert rule trong cùng cửa sổ ◀─ cập nhật ai_score + risk_score
 ```
 
-- **Feature** (`ai/features.py`): số process, shell, LOLBin, command line đáng ngờ, process chạy từ thư mục người dùng ghi được, Office sinh process con; số kết nối, số IP/cổng đích, kết nối ra ngoài; số truy vấn DNS, domain khác nhau, entropy domain; file thực thi được tạo, registry Run key, truy cập LSASS; số lần đăng nhập thất bại (Wazuh). Cùng một hàm được dùng cho train, chấm điểm thời gian thực và đánh giá.
-- **Model** (`ai/detector.py`): Isolation Forest train trên dữ liệu sạch, cộng thêm điểm novelty `Σ log2((x+1)/(p99+1))` cho các feature vượt p99 của baseline (Isolation Forest không phản ứng được với feature luôn bằng 0 lúc train, ví dụ truy cập LSASS). Ngưỡng của cả hai thành phần được hiệu chỉnh theo `--target-fpr` (mặc định 1% cửa sổ baseline).
-- **Giải thích**: mỗi kết quả kèm `top_features` (feature vượt baseline nhiều nhất) và gợi ý kỹ thuật MITRE ATT&CK.
-- **Chạy nền**: server tự chấm các cửa sổ đã đóng mỗi `XDR_AI_INTERVAL_SECONDS` giây (mặc định 60). Khi chưa có model, AI tự tắt và hệ thống vẫn chạy bình thường.
+- **Bảng tài sản** (`rules/assets.json`, đổi đường dẫn bằng `XDR_AI_ASSETS_PATH`): đưa mọi nguồn về cùng một máy. EDR dùng hostname, Wazuh dùng tên agent, Suricata chỉ có IP: alert Suricata được tính cho **máy bị tấn công** (IP nội bộ), IP còn lại là kẻ tấn công. `untrusted_networks` (VLAN tấn công) không bao giờ được coi là máy cần giám sát. Điền `aliases` = hostname Windows và tên Wazuh agent của từng máy.
+- **Feature** (`ai/features.py`): EDR (process, shell, LOLBin, command line đáng ngờ, kết nối, DNS, file thực thi, Run key, LSASS), Wazuh (đăng nhập sai và số IP nguồn, đăng nhập RDP – 4624 loại 10, đăng nhập được sau chuỗi sai, tấn công web trong log), Suricata (số alert, quét, brute force, tấn công web/SQLi, số IP tấn công). Cùng một hàm cho train, chấm thời gian thực và đánh giá.
+- **Tầng 1** (`ai/detector.py`): Isolation Forest train trên dữ liệu sạch + điểm novelty `Σ log2((x+1)/(p99+1))` cho feature vượt p99 baseline. Ngưỡng hiệu chỉnh theo `--target-fpr` (mặc định 1%). Model cũ (ít feature hơn) vẫn dùng được.
+- **Tầng 2** (`ai/scenarios.py`): Random Forest (class_weight cân bằng) phân loại cửa sổ thành `benign` hoặc một kịch bản. Chỉ báo kịch bản khi độ tin cậy ≥ `min_confidence` (mặc định 0,6). Khi chưa train tầng 2, tên kịch bản được **suy luận từ các feature vượt baseline** (ví dụ đăng nhập sai → brute force; đăng nhập RDP + lệnh đáng ngờ → chuỗi RDP + hậu khai thác).
+- **Chạy nền**: server tự chấm các cửa sổ đã đóng mỗi `XDR_AI_INTERVAL_SECONDS` giây. Chưa có model thì AI tự tắt, hệ thống vẫn chạy bình thường.
 
-### Train và đánh giá model
+### Quy trình trong lab
 
-1. Cài Sysmon, chạy EDR agent trên các máy Windows và dùng máy bình thường trong vài ngày để thu baseline sạch (tối thiểu 50 cửa sổ 5 phút; nên có nhiều hơn).
-2. Train (trong Docker: `docker compose exec api python -m ai.train ...`; chạy trực tiếp: tại thư mục `backend`):
-
-   ```bash
-   python -m ai.train --since 2026-11-01 --until 2026-11-06
-   ```
-
-   Cửa sổ có chứa cảnh báo rule sẽ bị loại khỏi baseline (dùng `--keep-alerted` để giữ). Model được lưu tại `XDR_AI_MODEL_PATH` (mặc định `data/ai_model.joblib`, nằm trong volume `xdr-data`). Server tự nạp lại model mới mà không cần khởi động lại.
-3. Đánh giá trên dữ liệu **không dùng để train** (dữ liệu sạch của những ngày sau, cùng dữ liệu tấn công như OTRF Security-Datasets hoặc Atomic Red Team chạy trong lab):
+1. **Baseline sạch (tầng 1)**: chạy EDR agent, Wazuh, Suricata, dùng các máy bình thường vài ngày (không tấn công), rồi train:
 
    ```bash
-   python -m ai.evaluate --benign-db data/xdr.sqlite3 --since 2026-11-06 --until 2026-11-08 \
-       --attack /path/to/otrf/*.zip --report data/ai_evaluation.json
+   python -m ai.train --since 2026-11-16 --until 2026-11-19 --keep-alerted
    ```
 
-   Kết quả gồm precision, recall, F1, FPR, ROC-AUC, PR-AUC và số cửa sổ tấn công do từng thành phần (Isolation Forest hoặc novelty) phát hiện. File OTRF, file Get-WinEvent export và `spool.jsonl` của EDR đều đọc được; event được lọc giống như EDR agent (Sysmon 1, 3, 10 chỉ với lsass, 11, 13, 22).
+   (Docker: `docker compose exec api python -m ai.train ...`.) Mặc định cửa sổ có alert rule bị loại khỏi baseline; dùng `--keep-alerted` khi đã kiểm tra các alert đó là báo nhầm. Nhiều database: `--db a.sqlite3 b.sqlite3`.
+2. **Chạy các kịch bản tấn công và ghi giờ (UTC)** vào CSV theo mẫu `rules/attack_runs.example.csv` (`run_id,scenario,host,start,end`). Mỗi kịch bản nên chạy **≥ 10 lần**, cách nhau ≥ 10 phút; `host` là `host_id` trong bảng tài sản (để trống = mọi máy).
+3. **Train tầng 2** (giữ lại khoảng 30% số lượt chạy của mỗi kịch bản để đánh giá, chia **theo lượt** để không rò rỉ):
 
-API: `GET /api/ai/status`, `GET /api/ai/windows?anomalies_only=true`, `POST /api/ai/analyze` (chấm ngay, quyền admin/analyst).
+   ```bash
+   python -m ai.train_scenarios --runs attack_runs.csv \
+       --benign-range 2026-11-16 2026-11-19 --report data/ai_scenarios_report.json
+   ```
 
-Dashboard: mục **AI phát hiện** hiển thị trạng thái model, biểu đồ AI score theo cửa sổ, bảng cửa sổ kèm lý do (bấm vào một dòng để so sánh từng feature với baseline p99) và các alert đã được AI chấm điểm.
+   In ra precision/recall/F1 từng kịch bản, ma trận nhầm lẫn, tỷ lệ phát hiện/báo nhầm trên phần giữ lại, rồi lưu model đã train trên toàn bộ dữ liệu vào `XDR_AI_SCENARIO_MODEL_PATH` (mặc định `data/ai_scenarios.joblib`). Server tự nạp.
+4. **Đánh giá tầng 1** trên dữ liệu không dùng để train, theo từng kịch bản:
+
+   ```bash
+   python -m ai.evaluate --benign-db data/xdr.sqlite3 --since 2026-11-19 --until 2026-11-20 \
+       --runs attack_runs.csv --report data/ai_evaluation.json
+   ```
+
+   Kết quả: precision, recall, F1, FPR (chung và theo từng máy), ROC-AUC, PR-AUC, recall theo kịch bản, thành phần nào (Isolation Forest/novelty) phát hiện. Cũng đọc được file OTRF, Get-WinEvent export, `spool.jsonl` (`--attack file...`) và khoảng thời gian (`--attack-range START END`).
+
+API: `GET /api/ai/status` (cả hai model, bảng tài sản), `GET /api/ai/windows?anomalies_only=true` (kèm `scenario`, `detected_by`), `POST /api/ai/analyze` (admin/analyst).
+
+Dashboard: mục **AI phát hiện** hiển thị hai model, tổng hợp kịch bản đã nhận diện theo máy, biểu đồ AI score, bảng cửa sổ (kịch bản, nguồn nhận diện, độ tin cậy, lý do) và chi tiết từng feature so với baseline.
 
 ### Demo nhanh (dữ liệu tổng hợp)
 
-Để xem trang AI khi chưa có máy Windows chạy EDR, tạo database và model **riêng cho demo** (không đụng tới dữ liệu thật). Không dùng kết quả demo làm số liệu đánh giá:
+Tạo database, bảng tài sản và **cả hai model riêng cho demo** theo sơ đồ lab (2 máy Windows, web server, máy tấn công), gồm các lượt tấn công có nhãn và một chuỗi tấn công "đang diễn ra" (quét → brute force → RDP + hậu khai thác, SQLi vào web). Không dùng kết quả demo làm số liệu đánh giá:
 
 ```bash
 cd backend
 python -m ai.demo
 ```
 
-Lệnh in ra câu lệnh khởi động server trỏ vào `data/demo.sqlite3` và `data/demo_model.joblib` (đăng nhập `admin` / `demo-password-123`).
+Lệnh in ra câu lệnh khởi động server trên các file demo (đăng nhập `admin` / `demo-password-123`).
 
-Biến môi trường: `XDR_AI_ENABLED` (mặc định `1`), `XDR_AI_MODEL_PATH`, `XDR_AI_INTERVAL_SECONDS` (60), `XDR_AI_LOOKBACK_MINUTES` (120), `XDR_AI_GRACE_SECONDS` (120: thời gian chờ event đến muộn trước khi chấm một cửa sổ). Event đến muộn hơn khi cửa sổ đã được chấm sẽ không được chấm lại.
+Biến môi trường: `XDR_AI_ENABLED` (`1`), `XDR_AI_MODEL_PATH`, `XDR_AI_SCENARIO_MODEL_PATH`, `XDR_AI_ASSETS_PATH`, `XDR_AI_INTERVAL_SECONDS` (60), `XDR_AI_LOOKBACK_MINUTES` (120), `XDR_AI_GRACE_SECONDS` (120: chờ event đến muộn trước khi chấm một cửa sổ).
 
 ## 5. Xử lý sự cố thường gặp
 

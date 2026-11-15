@@ -10,6 +10,8 @@ from typing import Any
 from ai.datasets import iter_db_events
 from ai.detector import AnomalyDetector, model_path
 from ai.features import WINDOW_SECONDS, group_windows, window_features
+from ai.scenarios import (BENIGN, ScenarioClassifier, heuristic_scenario, scenario_info,
+                          scenario_model_path)
 from database.database import analyzed_window_keys, get_database_path, save_ai_window
 from detection.rule_engine import load_default_rules
 
@@ -30,42 +32,86 @@ FEATURE_MITRE_HINTS = {
     "persistence_registry_count": "T1547.001",
     "lsass_access_count": "T1003.001",
     "auth_failure_count": "T1110",
+    "auth_failure_src_count": "T1110",
+    "ids_bruteforce_count": "T1110",
+    "rdp_logon_count": "T1021.001",
+    "auth_success_after_failures": "T1078",
+    "ids_scan_count": "T1046",
+    "ids_web_attack_count": "T1190",
+    "web_attack_count": "T1190",
 }
+HIGH_SEVERITY_SCENARIOS = {"rdp_compromise", "credential_access", "sql_injection", "command_and_control"}
 
 _lock = threading.Lock()
-_detector: AnomalyDetector | None = None
-_detector_key: tuple[str, float] | None = None
+_cache: dict[str, tuple[tuple[str, float], Any]] = {}
+
+
+def _cached(name: str, path: Path, loader) -> Any:
+    """Load a model once and reload it when its file changes (after retraining)."""
+    if not path.exists():
+        _cache.pop(name, None)
+        return None
+    key = (str(path.resolve()), path.stat().st_mtime)
+    if name not in _cache or _cache[name][0] != key:
+        _cache[name] = (key, loader(path))
+        log.info("Loaded AI %s %s", name, getattr(_cache[name][1], "version", None))
+    return _cache[name][1]
 
 
 def get_detector() -> AnomalyDetector | None:
-    """Load the model once and reload it when the model file changes (after retraining)."""
-    global _detector, _detector_key
-    path: Path = model_path()
-    if not path.exists():
-        _detector, _detector_key = None, None
-        return None
-    key = (str(path.resolve()), path.stat().st_mtime)
-    if _detector is None or key != _detector_key:
-        _detector = AnomalyDetector.load(path)
-        _detector_key = key
-        log.info("Loaded AI model %s", _detector.version if _detector else None)
-    return _detector
+    return _cached("anomaly model", model_path(), AnomalyDetector.load)
+
+
+def get_scenario_classifier() -> ScenarioClassifier | None:
+    return _cached("scenario model", scenario_model_path(), ScenarioClassifier.load)
 
 
 def _iso(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).isoformat()
 
 
+def assess_window(row: dict[str, float], anomaly: dict[str, Any], detector: AnomalyDetector,
+                  classified: dict[str, Any] | None) -> dict[str, Any]:
+    """Combine tier 1 (anomaly: is it unusual?) and tier 2 (scenario: which attack is it?).
+
+    A window is alerted when it is anomalous OR the classifier recognises a known
+    attack scenario with enough confidence. The scenario name comes from the
+    classifier when it recognises one, otherwise from the deviating features.
+    """
+    classifier_hit = bool(classified and classified["is_attack"])
+    if classifier_hit:
+        scenario = dict(classified)
+    elif anomaly["is_anomaly"]:
+        scenario = heuristic_scenario(detector.explain(row, limit=None))
+        if classified:
+            scenario["classifier"] = {k: classified[k] for k in ("id", "confidence", "probabilities")}
+    else:
+        scenario = {**scenario_info(BENIGN), "source": "classifier" if classified else "anomaly_model",
+                    "confidence": classified["confidence"] if classified else round(1 - anomaly["ai_score"], 4)}
+    final_score = max(anomaly["ai_score"], scenario["confidence"] if classifier_hit else 0.0)
+    return {
+        **anomaly,
+        "is_alert": bool(anomaly["is_anomaly"] or classifier_hit),
+        "final_score": round(final_score, 4),
+        "detected_by": [name for name, hit in (("anomaly", anomaly["is_anomaly"]),
+                                               ("classifier", classifier_hit)) if hit],
+        "scenario": scenario,
+    }
+
+
 def build_anomaly_alert(host_id: str, result: dict[str, Any], event_id: str) -> dict[str, Any]:
     top = result["top_features"]
+    scenario = result.get("scenario") or scenario_info("unknown")
     reason = ", ".join(f"{item['feature']}={item['value']:g}" for item in top) or "unusual feature combination"
-    mitre = sorted({FEATURE_MITRE_HINTS[item["feature"]] for item in top if item["feature"] in FEATURE_MITRE_HINTS})
+    mitre = {FEATURE_MITRE_HINTS[item["feature"]] for item in top if item["feature"] in FEATURE_MITRE_HINTS}
+    mitre.update(scenario.get("mitre", []))
+    score = result.get("final_score", result["ai_score"])
     return {
         "rule_id": "ai-anomaly",
-        "title": f"AI: anomalous behaviour on {host_id} ({reason})",
-        "severity": "high" if result["ai_score"] >= 0.8 else "medium",
+        "title": f"AI: {scenario['label']} trên {host_id} ({reason})",
+        "severity": "high" if score >= 0.8 or scenario["id"] in HIGH_SEVERITY_SCENARIOS else "medium",
         "confidence": 0.8,
-        "mitre_attack": mitre,
+        "mitre_attack": sorted(mitre),
         "event_id": event_id,
     }
 
@@ -77,6 +123,7 @@ def analyze_pending(now: datetime | None = None, lookback_minutes: int | None = 
         detector = get_detector()
         if detector is None:
             return {"status": "model_not_trained", "model_path": str(model_path())}
+        classifier = get_scenario_classifier()
 
         now = now or datetime.now(timezone.utc)
         lookback = timedelta(minutes=lookback_minutes or int(os.environ.get("XDR_AI_LOOKBACK_MINUTES", "120")))
@@ -97,24 +144,30 @@ def analyze_pending(now: datetime | None = None, lookback_minutes: int | None = 
             if start < horizon_start or end > closed_before or (host_id, _iso(start)) in done:
                 continue
             pending.append((host_id, start, end, window_events))
+        summary = {"status": "ok", "model_version": detector.version,
+                   "scenario_model_version": classifier.version if classifier else None}
         if not pending:
-            return {"status": "ok", "model_version": detector.version, "analyzed": 0, "anomalies": 0}
+            return {**summary, "analyzed": 0, "anomalies": 0, "scenarios": {}}
 
         rows = [window_features(window_events) for _, _, _, window_events in pending]
-        results = detector.score_many(rows)
+        anomalies = detector.score_many(rows)
+        classified = classifier.predict_many(rows) if classifier else [None] * len(rows)
         confidence = {str(rule.get("id")): float(rule.get("confidence", 1.0)) for rule in load_default_rules()}
 
-        anomalies = 0
-        for (host_id, start, end, window_events), features, result in zip(pending, rows, results):
+        alerts = 0
+        scenarios: dict[str, int] = {}
+        for (host_id, start, end, window_events), features, anomaly, scen in zip(pending, rows, anomalies, classified):
+            result = assess_window(features, anomaly, detector, scen)
             event_ids = [str(event["event_id"]) for event in window_events]
             alert = None
-            if result["is_anomaly"]:
-                anomalies += 1
+            if result["is_alert"]:
+                alerts += 1
+                scenarios[result["scenario"]["id"]] = scenarios.get(result["scenario"]["id"], 0) + 1
                 alert = build_anomaly_alert(host_id, result, event_ids[-1])
             save_ai_window(
                 {"host_id": host_id, "window_start": _iso(start), "window_end": _iso(end),
                  "event_count": len(window_events), "features": features},
                 result, event_ids, alert, confidence,
             )
-        log.info("AI analysed %s windows, %s anomalies", len(pending), anomalies)
-        return {"status": "ok", "model_version": detector.version, "analyzed": len(pending), "anomalies": anomalies}
+        log.info("AI analysed %s windows, %s alerts %s", len(pending), alerts, scenarios)
+        return {**summary, "analyzed": len(pending), "anomalies": alerts, "scenarios": scenarios}

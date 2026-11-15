@@ -131,6 +131,11 @@ def init_db() -> None:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(alerts)")}
         if "ai_score" not in columns:
             connection.execute("ALTER TABLE alerts ADD COLUMN ai_score REAL NOT NULL DEFAULT 0")
+        window_columns = {row[1] for row in connection.execute("PRAGMA table_info(ai_windows)")}
+        if "scenario" not in window_columns:
+            connection.execute("ALTER TABLE ai_windows ADD COLUMN scenario TEXT")
+        if "details_json" not in window_columns:
+            connection.execute("ALTER TABLE ai_windows ADD COLUMN details_json TEXT")
 
 def _event_dict(row: sqlite3.Row) -> dict[str, Any]:
     event = dict(row)
@@ -269,7 +274,12 @@ def save_ai_window(
     from risk.risk_engine import calculate_risk
 
     now = datetime.now(timezone.utc).isoformat()
-    ai_score = float(result["ai_score"])
+    # final_score also covers windows recognised only by the scenario classifier.
+    ai_score = float(result.get("final_score", result["ai_score"]))
+    is_alert = bool(result.get("is_alert", result["is_anomaly"]))
+    scenario = result.get("scenario") or {}
+    details = {key: result[key] for key in ("forest", "novelty", "detected_by", "scenario", "is_anomaly")
+               if key in result}
     alert_id = None
     enriched = 0
 
@@ -315,8 +325,8 @@ def save_ai_window(
         connection.execute(
             """INSERT OR REPLACE INTO ai_windows
             (host_id, window_start, window_end, event_count, features_json, ai_score, raw_score,
-             is_anomaly, top_features_json, model_version, alert_id, analyzed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             is_anomaly, top_features_json, model_version, alert_id, analyzed_at, scenario, details_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 window["host_id"],
                 window["window_start"],
@@ -325,11 +335,13 @@ def save_ai_window(
                 json.dumps(window["features"]),
                 ai_score,
                 float(result["raw_score"]),
-                int(bool(result["is_anomaly"])),
+                int(is_alert),
                 json.dumps(result["top_features"]),
                 result["model_version"],
                 alert_id,
                 now,
+                scenario.get("id"),
+                json.dumps(details, default=str),
             ),
         )
     return {"alert_id": alert_id, "enriched_alerts": enriched}
@@ -354,6 +366,11 @@ def list_ai_windows(host_id: str | None = None, anomalies_only: bool = False,
         window["features"] = json.loads(window.pop("features_json"))
         window["top_features"] = json.loads(window.pop("top_features_json"))
         window["is_anomaly"] = bool(window["is_anomaly"])
+        details = json.loads(window.pop("details_json", None) or "{}")
+        window["scenario"] = details.get("scenario") or (
+            {"id": window["scenario"], "label": window["scenario"]} if window.get("scenario") else None)
+        window["detected_by"] = details.get("detected_by", ["anomaly"] if window["is_anomaly"] else [])
+        window["anomaly_model"] = {k: details[k] for k in ("forest", "novelty", "is_anomaly") if k in details}
         windows.append(window)
     return windows
 

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#0b111b" />
     <title>XDR | Security Operations</title>
-    <link rel="stylesheet" href="/dashboard/dashboard.css?v=20261111" />
+    <link rel="stylesheet" href="/dashboard/dashboard.css?v=20261115" />
   </head>
   <body>
     <div class="shell">
@@ -153,7 +153,7 @@
           </section>
           <section class="panel ai-panel" id="ai">
             <div class="panel-heading ai-heading">
-              <div><h2>AI phát hiện bất thường</h2><p>Isolation Forest + novelty so với baseline · chấm theo host trong cửa sổ 5 phút</p></div>
+              <div><h2>AI phát hiện &amp; nhận diện tấn công</h2><p>Tầng 1: Isolation Forest + novelty so với baseline · Tầng 2: nhận diện kịch bản (Random Forest) · gộp EDR, Wazuh, Suricata theo host, cửa sổ 5 phút</p></div>
               <div class="event-controls">
                 <span class="panel-tag" id="ai-state-tag"><span class="tiny-dot"></span> ĐANG TẢI</span>
                 <button class="refresh-button" id="ai-analyze-button" type="button" hidden><span>✦</span> Chấm ngay</button>
@@ -164,13 +164,18 @@
               <div class="ai-stat"><span>MODEL</span><strong id="ai-model-version">—</strong><small id="ai-model-trained">Chưa có thông tin</small></div>
               <div class="ai-stat"><span>BASELINE</span><strong id="ai-training-windows">—</strong><small id="ai-training-caption">cửa sổ dùng để train</small></div>
               <div class="ai-stat"><span>ĐÃ CHẤM</span><strong id="ai-window-count">—</strong><small id="ai-window-caption">cửa sổ gần nhất</small></div>
-              <div class="ai-stat ai-stat-alert"><span>BẤT THƯỜNG</span><strong id="ai-anomaly-count">—</strong><small id="ai-anomaly-caption">cửa sổ vượt ngưỡng</small></div>
+              <div class="ai-stat"><span>NHẬN DIỆN KỊCH BẢN</span><strong id="ai-scenario-model">—</strong><small id="ai-scenario-caption">Chưa có thông tin</small></div>
+              <div class="ai-stat ai-stat-alert"><span>CẢNH BÁO AI</span><strong id="ai-anomaly-count">—</strong><small id="ai-anomaly-caption">cửa sổ vượt ngưỡng</small></div>
             </div>
+
+            <div class="ai-scenario-strip" id="ai-scenario-strip" aria-label="Kịch bản tấn công AI đã nhận diện"></div>
 
             <div class="ai-setup" id="ai-setup" hidden>
               <strong>AI chưa được bật vì chưa có model.</strong>
               <span>Thu baseline sạch bằng EDR agent (tối thiểu 50 cửa sổ 5 phút), sau đó train tại thư mục backend:</span>
               <code>python -m ai.train --since 2026-11-01 --until 2026-11-06</code>
+              <span>Tầng 2 (nhận diện kịch bản) cần file ghi giờ các lượt tấn công trong lab:</span>
+              <code>python -m ai.train_scenarios --runs attack_runs.csv --benign-range 2026-11-01 2026-11-06</code>
               <span>Server tự nạp model mới, không cần khởi động lại.</span>
             </div>
 
@@ -185,8 +190,8 @@
             </div>
             <div class="table-scroll">
               <table>
-                <thead><tr><th>HOST</th><th>CỬA SỔ</th><th>EVENT</th><th>AI SCORE</th><th>LÝ DO CHÍNH</th><th>KẾT LUẬN</th></tr></thead>
-                <tbody id="ai-windows-body"><tr><td colspan="6" class="empty-row">Đang tải kết quả AI...</td></tr></tbody>
+                <thead><tr><th>HOST</th><th>CỬA SỔ</th><th>EVENT</th><th>AI SCORE</th><th>KỊCH BẢN</th><th>LÝ DO CHÍNH</th><th>KẾT LUẬN</th></tr></thead>
+                <tbody id="ai-windows-body"><tr><td colspan="7" class="empty-row">Đang tải kết quả AI...</td></tr></tbody>
               </table>
             </div>
 
@@ -289,6 +294,6 @@
         </table>
       </div>
     </dialog>
-    <script src="/dashboard/dashboard.js?v=20261111" defer></script>
+    <script src="/dashboard/dashboard.js?v=20261115" defer></script>
   </body>
 </html>

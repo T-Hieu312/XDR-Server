@@ -34,8 +34,19 @@ FEATURE_NAMES = [
     "registry_set_count",
     "persistence_registry_count",
     "lsass_access_count",
-    # identity (Wazuh authentication failures)
+    # identity (Wazuh: Windows 4624/4625, sshd, ...)
     "auth_failure_count",
+    "auth_failure_src_count",
+    "rdp_logon_count",
+    "auth_success_after_failures",
+    # network IDS (Suricata alerts where this host is the target)
+    "ids_alert_count",
+    "ids_scan_count",
+    "ids_bruteforce_count",
+    "ids_web_attack_count",
+    "ids_attacker_count",
+    # web server logs (Wazuh web/accesslog rules)
+    "web_attack_count",
 ]
 
 SHELLS = {"powershell.exe", "pwsh.exe", "cmd.exe", "powershell_ise.exe"}
@@ -54,6 +65,18 @@ USER_WRITABLE_DIRS = ("\\temp\\", "\\appdata\\", "\\downloads\\", "\\users\\publ
 EXECUTABLE_EXTENSIONS = (".exe", ".dll", ".ps1", ".bat", ".cmd", ".vbs", ".js", ".hta", ".scr", ".jse")
 PERSISTENCE_KEYS = ("\\currentversion\\run", "\\services\\", "\\winlogon\\", "\\image file execution options\\")
 
+WAZUH_AUTH_FAILURE_GROUPS = {"authentication_failed", "authentication_failures", "invalid_login",
+                             "win_authentication_failed"}
+WAZUH_AUTH_SUCCESS_GROUPS = {"authentication_success"}
+WAZUH_WEB_ATTACK_GROUPS = {"attack", "sql_injection", "xss", "web_scan", "recon", "web_attack"}
+IDS_SCAN = re.compile(r"(?i)(\bscan\b|nmap|masscan|portscan|port sweep|network scan)")
+IDS_BRUTEFORCE = re.compile(r"(?i)(brute|password guess|login attempt|failed login|excessive|"
+                            r"\brdp\b|ms-rdp|\bssh\b.*(attempt|scan)|smb.*(logon|auth))")
+# "sql" alone would also match port scans such as "inbound to MSSQL port 1433".
+IDS_WEB_ATTACK = re.compile(r"(?i)(sql.?injection|\bsqli\b|union\s+(all\s+)?select|sqlmap|select\s+sleep|"
+                            r"xss|cross.site|web_server|web_specific|directory traversal|command injection|"
+                            r"\blfi\b|\brfi\b|web application attack)")
+
 
 def parse_timestamp(value: Any) -> datetime | None:
     if isinstance(value, datetime):
@@ -65,6 +88,8 @@ def parse_timestamp(value: Any) -> datetime | None:
         text = text[:-1] + "+00:00"
     # Windows SystemTime carries 7 fractional digits; Python accepts at most 6.
     text = re.sub(r"(\.\d{6})\d+", r"\1", text)
+    # Wazuh/Suricata write offsets as +0000; older Pythons only accept +00:00.
+    text = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", text)
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError:
@@ -78,16 +103,26 @@ def window_start(timestamp: datetime, window_seconds: int = WINDOW_SECONDS) -> d
 
 
 def group_windows(
-    events: Iterable[dict[str, Any]], window_seconds: int = WINDOW_SECONDS
+    events: Iterable[dict[str, Any]], window_seconds: int = WINDOW_SECONDS, assets: Any = None
 ) -> dict[tuple[str, datetime], list[dict[str, Any]]]:
-    """Group events by (host_id, window start). Events without a timestamp are skipped."""
+    """Group events by (monitored host, window start).
+
+    The asset map turns Wazuh agent names and Suricata IPs into the same host as
+    the EDR agent, so one window holds every source's view of that machine.
+    Events without a timestamp or without a monitored host are skipped.
+    """
+    from ai.assets import get_assets
+
+    assets = assets if assets is not None else get_assets()
     windows: dict[tuple[str, datetime], list[dict[str, Any]]] = defaultdict(list)
     for event in events:
         timestamp = parse_timestamp(event.get("timestamp"))
-        if timestamp is None:
+        resolved = assets.resolve(event) if timestamp is not None else None
+        if resolved is None:
             continue
-        host = str(event.get("host_id") or "unknown")
-        windows[(host, window_start(timestamp, window_seconds))].append(event)
+        host, peer = resolved
+        windows[(host, window_start(timestamp, window_seconds))].append(
+            {**event, "_peer_ip": peer} if peer else event)
     return dict(windows)
 
 
@@ -121,6 +156,19 @@ def _entropy(text: str) -> float:
     return -sum((n / len(text)) * math.log2(n / len(text)) for n in counts.values())
 
 
+def _wazuh_parts(event: dict[str, Any]) -> tuple[set[str], str, dict[str, Any], str]:
+    raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
+    rule = raw.get("rule") if isinstance(raw.get("rule"), dict) else {}
+    groups = rule.get("groups") if isinstance(rule.get("groups"), list) else []
+    data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+    win = data.get("win") if isinstance(data.get("win"), dict) else {}
+    eventdata = win.get("eventdata") if isinstance(win.get("eventdata"), dict) else {}
+    system = win.get("system") if isinstance(win.get("system"), dict) else {}
+    source_ip = str(eventdata.get("ipAddress") or data.get("srcip") or "").strip()
+    return ({str(g).lower() for g in groups}, str(rule.get("description") or "").lower(),
+            {**eventdata, "_event_id": str(system.get("eventID") or "")}, source_ip)
+
+
 def window_features(events: Iterable[dict[str, Any]]) -> dict[str, float]:
     """Compute the fixed feature vector for one host/window."""
     f = dict.fromkeys(FEATURE_NAMES, 0.0)
@@ -128,10 +176,49 @@ def window_features(events: Iterable[dict[str, Any]]) -> dict[str, float]:
     dst_ips: set[str] = set()
     dst_ports: set[str] = set()
     domains: set[str] = set()
+    auth_sources: set[str] = set()
+    attackers: set[str] = set()
+    auth_successes = 0
 
     for event in events:
         event_type = str(event.get("event_type") or "").lower()
+        source = str(event.get("source") or "").lower()
         data = _data(event)
+
+        if source == "suricata":
+            if event_type == "network_alert":
+                raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
+                alert = raw.get("alert") if isinstance(raw.get("alert"), dict) else {}
+                text = f"{alert.get('signature', '')} | {alert.get('category', '')}"
+                f["ids_alert_count"] += 1
+                if IDS_SCAN.search(text):
+                    f["ids_scan_count"] += 1
+                if IDS_BRUTEFORCE.search(text):
+                    f["ids_bruteforce_count"] += 1
+                if IDS_WEB_ATTACK.search(text):
+                    f["ids_web_attack_count"] += 1
+                if event.get("_peer_ip"):
+                    attackers.add(str(event["_peer_ip"]))
+            continue
+
+        if source == "wazuh":
+            groups, description, eventdata, source_ip = _wazuh_parts(event)
+            usable_ip = bool(source_ip) and source_ip not in {"-", "::1", "127.0.0.1"}
+            if (event_type == "authentication_failure" or eventdata["_event_id"] == "4625"
+                    or groups & WAZUH_AUTH_FAILURE_GROUPS):
+                f["auth_failure_count"] += 1
+                if usable_ip:
+                    auth_sources.add(source_ip)
+            elif eventdata["_event_id"] == "4624" or groups & WAZUH_AUTH_SUCCESS_GROUPS:
+                auth_successes += 1
+                if str(eventdata.get("logonType")) == "10":
+                    f["rdp_logon_count"] += 1
+            web_rule = ("web" in groups or "accesslog" in groups) and groups & WAZUH_WEB_ATTACK_GROUPS
+            if web_rule or "sql injection" in description or "xss" in description:
+                f["web_attack_count"] += 1
+                if usable_ip:
+                    attackers.add(source_ip)
+            continue
 
         if event_type == "process_create":
             image = str(data.get("Image") or "").replace("/", "\\").lower()
@@ -186,6 +273,9 @@ def window_features(events: Iterable[dict[str, Any]]) -> dict[str, float]:
         elif event_type == "authentication_failure":
             f["auth_failure_count"] += 1
 
+    f["auth_failure_src_count"] = float(len(auth_sources))
+    f["auth_success_after_failures"] = 1.0 if auth_successes and f["auth_failure_count"] >= 3 else 0.0
+    f["ids_attacker_count"] = float(len(attackers))
     f["unique_process_images"] = float(len(images))
     f["unique_dst_ip"] = float(len(dst_ips))
     f["unique_dst_port"] = float(len(dst_ports))

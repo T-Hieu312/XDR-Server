@@ -1,0 +1,11 @@
+{
+  "_note": "Lab topology (PNETLab). host_id is the name shown by XDR; aliases must contain the Windows hostname sent by the EDR agent and the Wazuh agent name of that machine. Suricata alerts are mapped by IP. The attack VLAN is untrusted: it is never treated as a monitored host.",
+  "internal_networks": ["10.10.0.0/16"],
+  "untrusted_networks": ["10.10.10.0/24"],
+  "hosts": [
+    {"host_id": "WIN10-01", "ips": ["10.10.20.100"], "aliases": ["win10-01"], "role": "endpoint"},
+    {"host_id": "WIN10-02", "ips": ["10.10.20.101"], "aliases": ["win10-02"], "role": "endpoint"},
+    {"host_id": "DNS-SRV", "ips": ["10.10.50.10"], "aliases": ["dns-srv"], "role": "server"},
+    {"host_id": "WEB-SRV", "ips": ["10.10.50.20"], "aliases": ["web-srv"], "role": "server"}
+  ]
+}

@@ -43,12 +43,15 @@ def main() -> None:
     for db_path in db_paths:
         if not Path(db_path).exists():
             raise SystemExit(f"Database not found: {db_path}")
-        events.extend(iter_db_events(db_path, args.since, args.until, args.hosts))
+        events.extend(iter_db_events(db_path, args.since, args.until))
         alerted |= alerted_event_ids(Path(db_path))
     if not events:
         raise SystemExit("No events found for training")
 
     windows = group_windows(events)
+    if args.hosts:  # filter on the mapped host, so Suricata/Wazuh events of that host stay in
+        wanted = {host.lower() for host in args.hosts}
+        windows = {key: value for key, value in windows.items() if key[0].lower() in wanted}
     dropped = 0
     if alerted and not args.keep_alerted:
         clean = {}
