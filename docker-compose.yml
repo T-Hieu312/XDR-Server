@@ -13,6 +13,7 @@ services:
       XDR_WAZUH_INGEST_KEY: ${XDR_WAZUH_INGEST_KEY-}
       XDR_SURICATA_INGEST_KEY: ${XDR_SURICATA_INGEST_KEY-}
       XDR_AI_MODEL_PATH: /app/data/ai_model.joblib
+      XDR_AI_SCENARIO_MODEL_PATH: /app/data/ai_scenarios.joblib
       XDR_AI_INTERVAL_SECONDS: ${XDR_AI_INTERVAL_SECONDS:-60}
     volumes:
       - xdr-data:/app/data

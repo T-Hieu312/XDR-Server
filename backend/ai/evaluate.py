@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +10,8 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 
 from ai.datasets import iter_db_events, load_file
 from ai.detector import AnomalyDetector, model_path
-from ai.features import group_windows, window_features
+from ai.features import WINDOW_SECONDS, group_windows, window_features
+from ai.scenarios import heuristic_scenario, label_windows, load_runs, near_any_run
 
 
 def score_windows(detector: AnomalyDetector, events: list[dict[str, Any]], label: int,
@@ -46,6 +48,29 @@ def metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
             "both": sum(1 for r in attacks if r["forest"]["anomaly"] and r["novelty"]["anomaly"]),
         },
     }
+    # Per-host false positives: one shared model must not be noisy on any single machine.
+    per_host: dict[str, dict[str, Any]] = {}
+    for r in results:
+        if r["label"] == 0:
+            host = per_host.setdefault(r["host_id"], {"benign_windows": 0, "fp": 0})
+            host["benign_windows"] += 1
+            host["fp"] += int(r["is_anomaly"])
+    for host in per_host.values():
+        host["false_positive_rate"] = round(host["fp"] / host["benign_windows"], 4)
+    report["benign_per_host"] = per_host
+    # Tier-1 recall per labelled scenario, and whether the heuristic named it correctly.
+    per_scenario: dict[str, dict[str, Any]] = {}
+    for r in attacks:
+        if not r.get("scenario"):
+            continue
+        stats = per_scenario.setdefault(r["scenario"], {"windows": 0, "detected": 0, "named_correctly": 0})
+        stats["windows"] += 1
+        stats["detected"] += int(r["is_anomaly"])
+        stats["named_correctly"] += int(r["is_anomaly"] and r.get("heuristic_scenario") == r["scenario"])
+    for stats in per_scenario.values():
+        stats["recall"] = round(stats["detected"] / stats["windows"], 4)
+    if per_scenario:
+        report["attack_per_scenario"] = per_scenario
     labels = [r["label"] for r in results]
     if len(set(labels)) == 2:
         scores = [r["anomaly_rank"] for r in results]
@@ -58,7 +83,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate the XDR AI model")
     parser.add_argument("--model", type=Path, default=None)
     parser.add_argument("--benign", nargs="*", default=[], help="Benign JSON/JSONL/ZIP files")
-    parser.add_argument("--benign-db", type=Path, help="XDR SQLite database with benign events")
+    parser.add_argument("--benign-db", type=Path, nargs="*", default=[],
+                        help="One or more XDR SQLite databases with benign events")
     parser.add_argument("--since", help="ISO start for --benign-db")
     parser.add_argument("--until", help="ISO end for --benign-db")
     parser.add_argument("--attack", nargs="*", default=[], help="Attack JSON/JSONL/ZIP files (e.g. OTRF)")
@@ -67,6 +93,8 @@ def main() -> None:
     parser.add_argument("--attack-range", nargs=2, action="append", default=[], metavar=("START", "END"),
                         help="UTC time range of an attack run in the database; repeat for several runs")
     parser.add_argument("--attack-hosts", nargs="*", help="Only label windows of these hosts as attack")
+    parser.add_argument("--runs", type=Path,
+                        help="Attack-runs CSV (scenario,start,end[,host]); windows are labelled per scenario")
     parser.add_argument("--report", type=Path, help="Write the full JSON report here")
     args = parser.parse_args()
 
@@ -77,17 +105,40 @@ def main() -> None:
     results: list[dict[str, Any]] = []
     for path in args.benign:
         results += score_windows(detector, load_file(path), 0, Path(path).name)
-    if args.benign_db:
-        results += score_windows(detector, list(iter_db_events(args.benign_db, args.since, args.until)),
-                                 0, "database")
+    for db_path in args.benign_db:
+        results += score_windows(detector, list(iter_db_events(db_path, args.since, args.until)),
+                                 0, f"database {Path(db_path).name}")
     for path in args.attack:
         results += score_windows(detector, load_file(path), 1, Path(path).name, args.attack_hosts)
-    attack_db = args.attack_db or args.benign_db
+    attack_db = args.attack_db or (args.benign_db[0] if args.benign_db else None)
     if args.attack_range and not attack_db:
         raise SystemExit("--attack-range needs --attack-db or --benign-db")
     for start, end in args.attack_range:
         results += score_windows(detector, list(iter_db_events(attack_db, start, end)), 1,
                                  f"database {start}..{end}", args.attack_hosts)
+    if args.runs:
+        if not attack_db:
+            raise SystemExit("--runs needs --attack-db or --benign-db")
+        runs = load_runs(args.runs)
+        margin = timedelta(seconds=WINDOW_SECONDS * 2)
+        # Benign windows next to an attack run are ambiguous: drop them from the benign set.
+        results = [r for r in results if r["label"] == 1 or not near_any_run(
+            datetime.fromisoformat(r["window_start"]), runs, margin)]
+        events = {}
+        for run in runs:
+            pad = timedelta(seconds=WINDOW_SECONDS)
+            for event in iter_db_events(attack_db, (run["start"] - pad).isoformat()[:19],
+                                        (run["end"] + pad).isoformat()[:19]):
+                events[str(event["event_id"])] = event
+        windows = group_windows(list(events.values()))
+        labelled = label_windows(windows, runs)
+        keys = list(labelled)
+        rows = [window_features(windows[key]) for key in keys]
+        for key, row, result in zip(keys, rows, detector.score_many(rows)):
+            named = heuristic_scenario(detector.explain(row, limit=None))["id"] if result["is_anomaly"] else None
+            results.append({"label": 1, "source": f"run {labelled[key]['run_id']}", "host_id": key[0],
+                            "window_start": key[1].isoformat(), "event_count": len(windows[key]),
+                            "scenario": labelled[key]["scenario"], "heuristic_scenario": named, **result})
     if not results:
         raise SystemExit("No windows to evaluate; pass --benign/--benign-db and/or --attack")
 
@@ -97,8 +148,9 @@ def main() -> None:
     print("\nAttack windows:")
     for r in (r for r in results if r["label"] == 1):
         top = ", ".join(f"{t['feature']}={t['value']:g}" for t in r["top_features"]) or "-"
+        scenario = f" {r['scenario']}->{r.get('heuristic_scenario') or '-'}" if r.get("scenario") else ""
         print(f"  {'DETECTED' if r['is_anomaly'] else 'missed  '} ai={r['ai_score']:.2f} "
-              f"{r['host_id']} {r['window_start']} events={r['event_count']} [{top}]")
+              f"{r['host_id']} {r['window_start']} events={r['event_count']}{scenario} [{top}]")
 
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)

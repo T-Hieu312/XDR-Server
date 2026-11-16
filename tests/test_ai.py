@@ -186,7 +186,9 @@ def test_end_to_end_ai_window_creates_alert_and_enriches_rule_alerts(client: Tes
 
     alerts = client.get("/api/alerts").json()
     ai_alerts = [alert for alert in alerts if alert["rule_id"] == "ai-anomaly"]
-    assert len(ai_alerts) == 1 and ai_alerts[0]["title"].startswith("AI: anomalous behaviour on victim-01")
+    assert len(ai_alerts) == 1 and ai_alerts[0]["title"].startswith("AI: ") and "victim-01" in ai_alerts[0]["title"]
+    # No scenario model here: the scenario is named from the deviating features.
+    assert {"T1003.001", "T1547.001"} <= set(ai_alerts[0]["mitre_attack"])
     for alert in alerts:
         if alert["alert_id"] in risk_before:
             assert alert["ai_score"] > 0.5
@@ -194,6 +196,8 @@ def test_end_to_end_ai_window_creates_alert_and_enriches_rule_alerts(client: Tes
 
     windows = client.get("/api/ai/windows", params={"anomalies_only": True}).json()
     assert windows[0]["host_id"] == "victim-01" and windows[0]["alert_id"] == ai_alerts[0]["alert_id"]
+    assert windows[0]["scenario"]["source"] == "heuristic" and windows[0]["detected_by"] == ["anomaly"]
+    assert windows[0]["scenario"]["id"] in {"execution", "credential_access", "persistence", "port_scan"}
     incident_ids = {alert["incident_id"] for alert in alerts}
     assert len(incident_ids) == 1  # rule and AI alerts land in the same host incident
 
@@ -202,3 +206,262 @@ def test_analyze_without_model_reports_status(client: TestClient, monkeypatch: p
     monkeypatch.setenv("XDR_AI_MODEL_PATH", str(tmp_path / "missing.joblib"))
     assert client.post("/api/ai/analyze").json()["status"] == "model_not_trained"
     assert client.get("/api/ai/status").json()["enabled"] is False
+
+
+# ------------------------------------------------------------ multi-source + scenarios
+
+from ai.assets import AssetMap  # noqa: E402
+from ai.scenarios import (ScenarioClassifier, heuristic_scenario, label_windows, load_runs,  # noqa: E402
+                          train_scenario_model)
+from ai.train_scenarios import split_holdout  # noqa: E402
+
+LAB_ASSETS = {
+    "internal_networks": ["10.10.0.0/16"],
+    "untrusted_networks": ["10.10.10.0/24"],
+    "hosts": [{"host_id": "WIN10-01", "ips": ["10.10.20.100"], "aliases": ["DESKTOP-ABC"]},
+              {"host_id": "WEB-SRV", "ips": ["10.10.50.20"], "aliases": ["web-server"]}],
+}
+T0 = datetime(2026, 11, 20, 3, 0, tzinfo=timezone.utc)
+
+
+def wazuh_event(event_id: str, ts: datetime, agent: str = "win10-01", ip: str = "10.10.10.50",
+                logon_type: str = "3", groups: list[str] | None = None, description: str = "") -> dict:
+    if groups is None:
+        groups = ["windows", "authentication_failed"] if event_id == "4625" else ["windows", "authentication_success"]
+    return {"event_type": "wazuh_alert", "source": "wazuh", "host_id": agent, "timestamp": ts.isoformat(),
+            "raw": {"agent": {"name": agent}, "rule": {"groups": groups, "description": description},
+                    "data": {"srcip": ip, "win": {"system": {"eventID": event_id},
+                                                  "eventdata": {"ipAddress": ip, "logonType": logon_type}}}}}
+
+
+def suricata_event(signature: str, ts: datetime, src: str = "10.10.10.50", dst: str = "10.10.20.100",
+                   category: str = "", event_type: str = "network_alert") -> dict:
+    return {"event_type": event_type, "source": "suricata", "host_id": src, "timestamp": ts.isoformat(),
+            "raw": {"src_ip": src, "dest_ip": dst, "alert": {"signature": signature, "category": category}}}
+
+
+def test_asset_map_puts_every_source_on_the_victim_host() -> None:
+    assets = AssetMap(LAB_ASSETS)
+    edr = edr_event("process_create", {"Image": "C:\\x.exe"}, "DESKTOP-ABC", T0)
+    events = [edr, wazuh_event("4625", T0), suricata_event("ET SCAN Nmap", T0),
+              suricata_event("ET POLICY response", T0, src="10.10.20.100", dst="10.10.10.50"),
+              suricata_event("ET WEB_SERVER SQL Injection", T0, dst="10.10.50.20")]
+    windows = group_windows(events, assets=assets)
+    assert sorted((host, len(items)) for (host, _), items in windows.items()) == [("WEB-SRV", 1), ("WIN10-01", 4)]
+    # Flow metadata and alerts that involve no monitored host are ignored.
+    assert assets.resolve(suricata_event("x", T0, event_type="suricata_flow")) is None
+    assert assets.resolve(suricata_event("x", T0, src="8.8.8.8", dst="10.10.10.9")) is None
+
+
+def test_multi_source_features_capture_bruteforce_rdp_and_sqli() -> None:
+    assets = AssetMap(LAB_ASSETS)
+    events = [wazuh_event("4625", T0, ip=f"10.10.10.{50 + i % 2}") for i in range(30)]
+    events += [wazuh_event("4624", T0, logon_type="10")]
+    events += [suricata_event("ET SCAN Possible Nmap User-Agent Observed", T0),
+               suricata_event("ET SCAN Behavioral Unusual Port 3389 traffic Potential Brute Force", T0),
+               suricata_event("ET WEB_SERVER Possible SQL Injection Attempt UNION SELECT", T0, dst="10.10.50.20",
+                              category="Web Application Attack"),
+               wazuh_event("", T0, agent="web-server", groups=["web", "accesslog", "attack", "sql_injection"],
+                           description="SQL injection attempt.")]
+    windows = {host: window_features(items) for (host, _), items in group_windows(events, assets=assets).items()}
+    win, web = windows["WIN10-01"], windows["WEB-SRV"]
+    assert win["auth_failure_count"] == 30 and win["auth_failure_src_count"] == 2
+    assert win["rdp_logon_count"] == 1 and win["auth_success_after_failures"] == 1
+    assert win["ids_alert_count"] == 2 and win["ids_scan_count"] == 2 and win["ids_bruteforce_count"] == 1
+    assert win["ids_attacker_count"] == 1
+    assert web["ids_web_attack_count"] == 1 and web["web_attack_count"] == 1
+    assert web["sqli_count"] == 2  # Suricata UNION SELECT + Wazuh sql_injection rule
+
+
+def _proc(image: str, cmd: str, parent: str = "C:\\Windows\\explorer.exe") -> dict:
+    return edr_event("process_create", {"Image": f"C:\\Windows\\System32\\{image}", "CommandLine": cmd,
+                                        "ParentImage": parent})
+
+
+def test_endpoint_technique_features() -> None:
+    attack = [
+        _proc("whoami.exe", "whoami /all"), _proc("net.exe", "net user"), _proc("net1.exe", "net1 user"),
+        _proc("systeminfo.exe", "systeminfo"), _proc("nltest.exe", "nltest /dclist:"),
+        _proc("reg.exe", "reg save HKLM\\SAM C:\\Users\\Public\\sam"),
+        _proc("rundll32.exe", "rundll32.exe C:\\Windows\\System32\\comsvcs.dll, MiniDump 640 l.dmp full"),
+        _proc("cmd.exe", "cmd.exe /Q /c hostname", "C:\\Windows\\System32\\wbem\\WmiPrvSE.exe"),
+        _proc("PSEXESVC.exe", "PSEXESVC.exe"),
+        _proc("sc.exe", "sc \\\\10.10.20.101 create upd binPath= C:\\t.exe"),
+        _proc("net.exe", "net user backdoor P@ssw0rd! /add"),
+        _proc("net.exe", "net localgroup administrators backdoor /add"),
+        _proc("wevtutil.exe", "wevtutil cl Security"),
+        _proc("WindowsPowerShell\\v1.0\\powershell.exe", "powershell Set-MpPreference -DisableRealtimeMonitoring $true"),
+        _proc("vssadmin.exe", "vssadmin delete shadows /all /quiet"),
+        _proc("bcdedit.exe", "bcdedit /set {default} recoveryenabled no"),
+        edr_event("file_create", {"TargetFilename": "C:\\Users\\a\\Desktop\\HOW_TO_DECRYPT.txt"}),
+        edr_event("file_create", {"TargetFilename": "C:\\Users\\a\\Documents\\report.docx.locked"}),
+        edr_event("dns_query", {"QueryName": "aGVsbG8gd29ybGQgdGhpcyBpcyBleGZpbHRyYXRpb24gZGF0YQ.t.evil.test"}),
+    ]
+    f = window_features(attack)
+    assert f["discovery_cmd_count"] == 4  # whoami, net (net1 counted as net), systeminfo, nltest
+    assert f["credential_dump_cmd_count"] == 2
+    assert f["remote_exec_count"] == 2  # shell spawned by WMI + PsExec service
+    assert f["service_install_count"] == 1 and f["account_change_count"] == 2
+    assert f["defense_evasion_count"] == 2 and f["inhibit_recovery_count"] == 2
+    assert f["ransom_note_count"] == 2 and f["long_dns_query_count"] == 1 and f["max_dns_query_length"] > 60
+
+    # Benign look-alikes must stay at zero.
+    benign = window_features([
+        _proc("whoami.exe", "whoami /user /fo csv /nh", "C:\\Program Files\\Microsoft VS Code\\Code.exe"),
+        _proc("wevtutil.exe", "wevtutil.exe im C:\\app\\manifest.man"),
+        _proc("WmiPrvSE.exe", "wmiprvse.exe -Embedding", "C:\\Windows\\System32\\svchost.exe"),
+        edr_event("file_create", {"TargetFilename": "C:\\proj\\node_modules\\pkg\\README.md"}),
+        edr_event("dns_query", {"QueryName": "update.code.visualstudio.com"}),
+    ])
+    for name in ("credential_dump_cmd_count", "remote_exec_count", "service_install_count", "account_change_count",
+                 "defense_evasion_count", "inhibit_recovery_count", "ransom_note_count", "long_dns_query_count"):
+        assert benign[name] == 0, name
+    assert benign["discovery_cmd_count"] == 1
+
+
+def test_wazuh_and_suricata_technique_features() -> None:
+    assets = AssetMap(LAB_ASSETS)
+    events = [wazuh_event("4720", T0, groups=["windows", "adduser"]),
+              wazuh_event("4732", T0, groups=["windows", "group_changed"]),
+              wazuh_event("7045", T0, groups=["windows", "policy_changed"]),
+              wazuh_event("1102", T0, groups=["windows", "logs_cleared"]),
+              suricata_event("ET DOS Possible SYN Flood", T0, dst="10.10.50.20"),
+              suricata_event("ET SCAN Suspicious inbound to MSSQL port 1433", T0, dst="10.10.50.20")]
+    windows = {host: window_features(items) for (host, _), items in group_windows(events, assets=assets).items()}
+    assert windows["WIN10-01"]["account_change_count"] == 2
+    assert windows["WIN10-01"]["service_install_count"] == 1 and windows["WIN10-01"]["defense_evasion_count"] == 1
+    assert windows["WEB-SRV"]["ids_dos_count"] == 1
+    assert windows["WEB-SRV"]["sqli_count"] == 0 and windows["WEB-SRV"]["ids_web_attack_count"] == 0
+
+
+def test_heuristic_names_the_new_scenarios() -> None:
+    def dev(*features: str) -> list[dict]:
+        return [{"feature": name, "value": 3, "baseline_p99": 0, "ratio": 4} for name in features]
+
+    expected = {
+        ("discovery_cmd_count",): "discovery",
+        ("remote_exec_count", "discovery_cmd_count", "shell_process_count"): "lateral_movement",
+        ("account_change_count",): "account_manipulation",
+        ("defense_evasion_count",): "defense_evasion",
+        ("inhibit_recovery_count", "file_create_count", "discovery_cmd_count"): "ransomware",
+        ("long_dns_query_count", "max_dns_query_length"): "dns_tunneling",
+        ("ids_dos_count",): "dos",
+        ("credential_dump_cmd_count",): "credential_access",
+    }
+    for features, scenario in expected.items():
+        result = heuristic_scenario(dev(*features))
+        assert result["id"] == scenario, (features, result["id"])
+    assert "T1490" in heuristic_scenario(dev("inhibit_recovery_count"))["mitre"]
+
+
+def test_heuristic_names_the_scenario_from_deviating_features() -> None:
+    def dev(feature: str, ratio: float) -> dict:
+        return {"feature": feature, "value": 1, "baseline_p99": 0, "ratio": ratio}
+
+    assert heuristic_scenario([dev("auth_failure_count", 31)])["id"] == "bruteforce"
+    assert heuristic_scenario([dev("ids_web_attack_count", 4), dev("web_attack_count", 3)])["id"] == "web_attack"
+    assert heuristic_scenario([dev("ids_web_attack_count", 9), dev("sqli_count", 2)])["id"] == "sql_injection"
+    chain = heuristic_scenario([dev("rdp_logon_count", 2), dev("suspicious_cmdline_count", 3),
+                                dev("persistence_registry_count", 2)])
+    assert chain["id"] == "rdp_compromise" and {"T1021.001", "T1547.001"} <= set(chain["mitre"])
+    assert heuristic_scenario([])["id"] == "unknown"
+
+
+def _scenario_row(rng: random.Random, scenario: str) -> dict:
+    # A third of the windows have no endpoint activity at all (idle host, or only network/Wazuh data).
+    row = window_features(benign_window(rng) if rng.random() > 0.33 else [])
+    if scenario == "bruteforce":
+        ids = rng.randint(0, 5)
+        row.update(auth_failure_count=rng.randint(20, 200), auth_failure_src_count=1,
+                   ids_bruteforce_count=ids, ids_alert_count=ids)
+    elif scenario == "sql_injection":
+        row.update(ids_web_attack_count=rng.randint(3, 60), ids_alert_count=rng.randint(3, 60),
+                   web_attack_count=rng.randint(0, 40), ids_attacker_count=1)
+    elif scenario == "port_scan":
+        row.update(ids_scan_count=rng.randint(2, 30), ids_alert_count=rng.randint(2, 30), ids_attacker_count=1)
+    return row
+
+
+def test_scenario_classifier_recognises_lab_scenarios() -> None:
+    rng = random.Random(3)
+    labels = ["benign"] * 150 + ["bruteforce"] * 30 + ["sql_injection"] * 30 + ["port_scan"] * 30
+    classifier = ScenarioClassifier(train_scenario_model([_scenario_row(rng, label) for label in labels], labels))
+    tests = {label: _scenario_row(rng, label) for label in ("benign", "bruteforce", "sql_injection", "port_scan")}
+    predictions = dict(zip(tests, classifier.predict_many(list(tests.values()))))
+    assert {label: p["id"] for label, p in predictions.items()} == {label: label for label in tests}
+    assert not predictions["benign"]["is_attack"] and predictions["bruteforce"]["is_attack"]
+    assert predictions["bruteforce"]["mitre"] == ["T1110"]
+
+
+def test_runs_csv_labels_windows_and_holdout_keeps_runs_whole(tmp_path: Path) -> None:
+    csv_file = tmp_path / "runs.csv"
+    csv_file.write_text("scenario,start,end,host\n"
+                        "bruteforce,2026-11-20T03:00:00Z,2026-11-20T03:08:00Z,WIN10-01\n"
+                        "bruteforce,2026-11-20T04:00:00Z,2026-11-20T04:04:00Z,WIN10-01\n"
+                        "sql_injection,2026-11-20T05:00:00Z,2026-11-20T05:04:00Z,WEB-SRV\n", encoding="utf-8")
+    runs = load_runs(csv_file)
+    windows = {("WIN10-01", T0): [], ("WIN10-01", T0 + timedelta(minutes=5)): [],
+               ("WEB-SRV", T0): [], ("WIN10-01", T0 + timedelta(hours=1)): [],
+               ("WEB-SRV", T0 + timedelta(hours=2)): []}
+    labelled = label_windows(windows, runs)
+    assert {key: run["scenario"] for key, run in labelled.items()} == {
+        ("WIN10-01", T0): "bruteforce", ("WIN10-01", T0 + timedelta(minutes=5)): "bruteforce",
+        ("WIN10-01", T0 + timedelta(hours=1)): "bruteforce", ("WEB-SRV", T0 + timedelta(hours=2)): "sql_injection"}
+    samples = [{"label": run["scenario"], "group": run["run_id"], "window_start": key[1], "features": {}}
+               for key, run in labelled.items()]
+    samples += [{"label": "benign", "group": "benign", "window_start": T0 + timedelta(minutes=i), "features": {}}
+                for i in range(10)]
+    train, test = split_holdout(samples, 0.5)
+    train_groups, test_groups = {s["group"] for s in train}, {s["group"] for s in test}
+    for run in runs:
+        assert not (run["run_id"] in train_groups and run["run_id"] in test_groups)  # a run is never split
+    assert sum(s["label"] == "benign" for s in test) == 5
+
+
+def test_end_to_end_wazuh_bruteforce_is_recognised_by_scenario_model(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bundle: dict) -> None:
+    import json
+
+    import joblib
+
+    rng = random.Random(5)
+    labels = ["benign"] * 150 + ["bruteforce"] * 40 + ["sql_injection"] * 40
+    joblib.dump(train_scenario_model([_scenario_row(rng, label) for label in labels], labels),
+                tmp_path / "scenarios.joblib")
+    assets_file = tmp_path / "assets.json"
+    assets_file.write_text(json.dumps(LAB_ASSETS), encoding="utf-8")
+    model_file = tmp_path / "model.joblib"
+    save_model(bundle, model_file)
+    settings = {"XDR_DATABASE_PATH": str(tmp_path / "xdr.sqlite3"), "XDR_AI_MODEL_PATH": str(model_file),
+                "XDR_AI_SCENARIO_MODEL_PATH": str(tmp_path / "scenarios.joblib"),
+                "XDR_AI_ASSETS_PATH": str(assets_file), "XDR_AI_ENABLED": "0",
+                "XDR_AGENT_KEY": "k", "XDR_WAZUH_INGEST_KEY": "wazuh-key",
+                "XDR_BOOTSTRAP_ADMIN_USERNAME": "admin", "XDR_BOOTSTRAP_ADMIN_PASSWORD": "test-admin-password"}
+    for key, value in settings.items():
+        monkeypatch.setenv(key, value)
+
+    ts = datetime.now(timezone.utc) - timedelta(minutes=15)
+    alerts = []
+    for i in range(40):
+        record = wazuh_event("4625", ts + timedelta(seconds=i))["raw"]
+        alerts.append({**record, "id": f"brute-{i}", "timestamp": (ts + timedelta(seconds=i)).isoformat(),
+                       "rule": {"id": "60122", "level": 5, "groups": ["windows", "authentication_failed"],
+                                "description": "Logon failure - Unknown user or bad password"}})
+    with TestClient(app) as client:
+        login = client.post("/api/auth/login", json={"username": "admin", "password": "test-admin-password"})
+        client.headers["Authorization"] = f"Bearer {login.json()['access_token']}"
+        response = client.post("/api/collectors/wazuh/events", json={"alerts": alerts},
+                               headers={"X-Collector-Key": "wazuh-key"})
+        assert response.json()["received"] == 40
+
+        status = client.get("/api/ai/status").json()
+        assert status["scenario_model"]["enabled"] and status["assets"]["hosts"] == ["WIN10-01", "WEB-SRV"]
+        result = client.post("/api/ai/analyze").json()
+        assert result["scenarios"] == {"bruteforce": 1}
+
+        window = client.get("/api/ai/windows", params={"anomalies_only": True}).json()[0]
+        assert window["host_id"] == "WIN10-01"  # Wazuh agent "win10-01" mapped to the asset
+        assert window["scenario"]["id"] == "bruteforce" and window["scenario"]["source"] == "classifier"
+        ai_alert = next(a for a in client.get("/api/alerts").json() if a["rule_id"] == "ai-anomaly")
+        assert ai_alert["title"].startswith("AI: Brute force đăng nhập trên WIN10-01")
+        assert "T1110" in ai_alert["mitre_attack"]

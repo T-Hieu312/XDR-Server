@@ -32,6 +32,32 @@ const AI_FEATURE_LABELS = {
   persistence_registry_count: "Ghi Run key / Services",
   lsass_access_count: "Truy cập LSASS",
   auth_failure_count: "Đăng nhập thất bại",
+  auth_failure_src_count: "Số IP đăng nhập sai",
+  rdp_logon_count: "Đăng nhập RDP",
+  auth_success_after_failures: "Đăng nhập được sau chuỗi sai",
+  ids_alert_count: "Alert IDS (Suricata)",
+  ids_scan_count: "IDS: quét mạng",
+  ids_bruteforce_count: "IDS: brute force",
+  ids_web_attack_count: "IDS: tấn công web / SQLi",
+  ids_attacker_count: "Số IP tấn công",
+  web_attack_count: "Log web: tấn công (Wazuh)",
+  discovery_cmd_count: "Lệnh thu thập thông tin",
+  credential_dump_cmd_count: "Lệnh dump mật khẩu (SAM/LSASS)",
+  remote_exec_count: "Thực thi từ xa (PsExec/WMI)",
+  service_install_count: "Cài service mới",
+  account_change_count: "Tạo / sửa tài khoản",
+  defense_evasion_count: "Xoá log / tắt Defender",
+  inhibit_recovery_count: "Xoá shadow copy / backup",
+  ransom_note_count: "File mã hoá / ghi chú tống tiền",
+  max_dns_query_length: "Truy vấn DNS dài nhất",
+  long_dns_query_count: "Truy vấn DNS bất thường dài",
+  sqli_count: "SQL injection (IDS + log web)",
+  ids_dos_count: "IDS: DoS / flood",
+};
+const AI_SCENARIO_SOURCES = {
+  classifier: "Bộ phân loại (tầng 2)",
+  heuristic: "Suy luận từ đặc trưng",
+  anomaly_model: "Model bất thường",
 };
 const state = {
   events: [], alerts: [], hosts: [], incidents: [], aiStatus: null, aiWindows: [], loading: false,
@@ -550,6 +576,24 @@ function featureChips(topFeatures) {
     `<span class="ai-chip" title="${escapeHtml(item.feature)}: ${escapeHtml(item.value)} (baseline p99 ${escapeHtml(item.baseline_p99)})">${escapeHtml(featureLabel(item.feature))}: ${escapeHtml(item.value)}</span>`).join("")}</span>`;
 }
 
+function scenarioOf(window) {
+  return window.scenario || { id: window.is_anomaly ? "unknown" : "benign", label: window.is_anomaly ? "Bất thường" : "Bình thường" };
+}
+
+function scenarioCell(window) {
+  const scenario = scenarioOf(window);
+  if (scenario.id === "benign") return '<span class="ai-chip-none">—</span>';
+  const confidence = scenario.confidence ? ` · ${Math.round(Number(scenario.confidence) * 100)}%` : "";
+  return `<span class="ai-scenario ai-scenario-${escapeHtml(scenario.id)}">${escapeHtml(scenario.label)}</span>`
+    + `<span class="event-id">${escapeHtml(AI_SCENARIO_SOURCES[scenario.source] || scenario.source || "")}${confidence}</span>`;
+}
+
+function verdictLabel(window) {
+  if (!window.is_anomaly) return "Bình thường";
+  const by = window.detected_by || [];
+  return by.includes("anomaly") ? "Bất thường" : "Kịch bản đã biết";
+}
+
 function formatWindow(window) {
   const start = dateValue(window.window_start);
   const end = dateValue(window.window_end);
@@ -578,12 +622,37 @@ function renderAiStatus() {
   byId("ai-training-caption").textContent = enabled
     ? `cửa sổ · FPR mục tiêu ${(status.target_fpr * 100).toFixed(1)}% · ${(status.hosts || []).length} host`
     : "cửa sổ dùng để train";
+  const scenarioModel = status && status.scenario_model;
+  const classes = scenarioModel && scenarioModel.enabled ? scenarioModel.classes.filter((name) => name !== "benign") : [];
+  byId("ai-scenario-model").textContent = scenarioModel && scenarioModel.enabled ? scenarioModel.version : "Suy luận";
+  byId("ai-scenario-caption").textContent = scenarioModel && scenarioModel.enabled
+    ? `${classes.length} kịch bản đã học · ngưỡng ${Math.round(scenarioModel.min_confidence * 100)}%`
+    : "chưa train tầng 2 · đặt tên theo đặc trưng";
   const anomalies = state.aiWindows.filter((window) => window.is_anomaly).length;
   byId("ai-window-count").textContent = numberFormat.format(state.aiWindows.length);
   byId("ai-anomaly-count").textContent = numberFormat.format(anomalies);
   byId("ai-anomaly-caption").textContent = state.aiWindows.length
     ? `${((anomalies / state.aiWindows.length) * 100).toFixed(1)}% số cửa sổ đã chấm`
     : "cửa sổ vượt ngưỡng";
+}
+
+function renderAiScenarioStrip() {
+  const counts = new Map();
+  state.aiWindows.filter((window) => window.is_anomaly).forEach((window) => {
+    const scenario = scenarioOf(window);
+    const entry = counts.get(scenario.id) || { label: scenario.label, count: 0, hosts: new Set() };
+    entry.count += 1;
+    entry.hosts.add(window.host_id);
+    counts.set(scenario.id, entry);
+  });
+  const strip = byId("ai-scenario-strip");
+  if (!counts.size) {
+    strip.innerHTML = '<span class="ai-chip-none">Chưa nhận diện kịch bản tấn công nào trong các cửa sổ gần đây.</span>';
+    return;
+  }
+  strip.innerHTML = [...counts.entries()].sort((a, b) => b[1].count - a[1].count).map(([id, entry]) =>
+    `<span class="ai-scenario-card ai-scenario-${escapeHtml(id)}"><b>${numberFormat.format(entry.count)}</b>`
+    + `<span>${escapeHtml(entry.label)}</span><small>${escapeHtml([...entry.hosts].join(", "))}</small></span>`).join("");
 }
 
 function renderAiTimeline() {
@@ -594,7 +663,8 @@ function renderAiTimeline() {
   }
   byId("ai-timeline").innerHTML = windows.map((window, index) => {
     const height = Math.max(3, Math.round(Number(window.ai_score || 0) * 100));
-    const title = `${window.host_id} · ${formatWindow(window)} · AI ${scoreText(window.ai_score)}`;
+    const scenario = window.is_anomaly ? ` · ${scenarioOf(window).label}` : "";
+    const title = `${window.host_id} · ${formatWindow(window)} · AI ${scoreText(window.ai_score)}${scenario}`;
     return `<span class="ai-bar ${window.is_anomaly ? "anomaly" : ""}" data-ai-bar="${index}" style="height:${height}%" title="${escapeHtml(title)}"></span>`;
   }).join("");
   byId("ai-timeline").querySelectorAll("[data-ai-bar]").forEach((bar) => {
@@ -613,7 +683,7 @@ function renderAiWindows() {
   const windows = filteredAiWindows();
   if (!windows.length) {
     const message = state.aiWindows.length ? "Không có cửa sổ phù hợp bộ lọc." : "Chưa có kết quả AI.";
-    byId("ai-windows-body").innerHTML = `<tr><td colspan="6" class="empty-row">${message}</td></tr>`;
+    byId("ai-windows-body").innerHTML = `<tr><td colspan="7" class="empty-row">${message}</td></tr>`;
     return;
   }
   byId("ai-windows-body").innerHTML = windows.slice(0, 15).map((window, index) => `
@@ -622,8 +692,9 @@ function renderAiWindows() {
       <td class="time-cell">${escapeHtml(formatWindow(window))}</td>
       <td>${numberFormat.format(window.event_count)}</td>
       <td>${aiScoreCell(window.ai_score)}</td>
+      <td>${scenarioCell(window)}</td>
       <td>${featureChips(window.top_features)}</td>
-      <td><span class="status-pill ${window.is_anomaly ? "ai-verdict-anomaly" : "ai-verdict-normal"}">${window.is_anomaly ? "Bất thường" : "Bình thường"}</span></td>
+      <td><span class="status-pill ${window.is_anomaly ? "ai-verdict-anomaly" : "ai-verdict-normal"}">${escapeHtml(verdictLabel(window))}</span></td>
     </tr>`).join("");
   byId("ai-windows-body").querySelectorAll("[data-ai-window]").forEach((row) => {
     row.addEventListener("click", () => showAiWindow(windows[Number(row.dataset.aiWindow)]));
@@ -655,6 +726,7 @@ function renderAiAlerts() {
 
 function renderAi() {
   renderAiStatus();
+  renderAiScenarioStrip();
   renderAiTimeline();
   renderAiWindows();
   renderAiAlerts();
@@ -663,14 +735,21 @@ function renderAi() {
 function showAiWindow(window) {
   if (!window) return;
   const p99 = (state.aiStatus && state.aiStatus.feature_p99) || {};
-  byId("ai-dialog-title").textContent = `${window.host_id} · ${window.is_anomaly ? "Bất thường" : "Bình thường"}`;
+  const scenario = scenarioOf(window);
+  const probabilities = scenario.probabilities || (scenario.classifier && scenario.classifier.probabilities);
+  byId("ai-dialog-title").textContent = `${window.host_id} · ${window.is_anomaly ? scenario.label : "Bình thường"}`;
   byId("ai-dialog-meta").innerHTML = [
     `Cửa sổ: ${escapeHtml(formatWindow(window))}`,
     `AI score: ${escapeHtml(scoreText(window.ai_score))}`,
     `Event: ${escapeHtml(window.event_count)}`,
+    `Kịch bản: ${escapeHtml(scenario.label)}${scenario.confidence ? ` (${Math.round(Number(scenario.confidence) * 100)}%)` : ""}`,
+    `Nguồn nhận diện: ${escapeHtml(AI_SCENARIO_SOURCES[scenario.source] || scenario.source || "—")}`,
+    `Phát hiện bởi: ${escapeHtml((window.detected_by || []).map((name) => name === "anomaly" ? "tầng 1 (bất thường)" : "tầng 2 (phân loại)").join(" + ") || "—")}`,
+    scenario.mitre && scenario.mitre.length ? `MITRE: ${escapeHtml(scenario.mitre.join(", "))}` : "",
+    probabilities ? `Xác suất: ${escapeHtml(Object.entries(probabilities).map(([name, p]) => `${name} ${Math.round(p * 100)}%`).join(" · "))}` : "",
     `Model: ${escapeHtml(window.model_version)}`,
     window.alert_id ? `Alert: ${escapeHtml(window.alert_id)}` : "Không tạo alert",
-  ].map((value) => `<span>${value}</span>`).join("");
+  ].filter(Boolean).map((value) => `<span>${value}</span>`).join("");
   byId("ai-dialog-features").innerHTML = Object.entries(window.features || {}).map(([name, value]) => {
     const baseline = p99[name];
     const exceeded = baseline !== undefined && Number(value) > Number(baseline);
@@ -701,7 +780,8 @@ async function runAiAnalysis() {
     if (result.status === "model_not_trained") {
       showToast("Chưa có model AI. Hãy train model trước (python -m ai.train).");
     } else {
-      showToast(`AI đã chấm ${result.analyzed} cửa sổ mới, phát hiện ${result.anomalies} bất thường.`);
+      const found = Object.entries(result.scenarios || {}).map(([name, count]) => `${name}: ${count}`).join(", ");
+      showToast(`AI đã chấm ${result.analyzed} cửa sổ mới, ${result.anomalies} cảnh báo${found ? ` (${found})` : ""}.`);
       await refreshDashboard();
     }
   } catch (error) {

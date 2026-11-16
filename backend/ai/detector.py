@@ -86,15 +86,17 @@ def save_model(bundle: dict[str, Any], path: Path | None = None) -> Path:
 
 class AnomalyDetector:
     def __init__(self, bundle: dict[str, Any]):
-        if bundle.get("feature_names") != FEATURE_NAMES:
-            raise ValueError("Model was trained with a different feature set; retrain it")
+        # Older models use a subset of today's features; score them on that subset.
+        self.feature_names = list(bundle.get("feature_names") or [])
+        if not self.feature_names or set(self.feature_names) - set(FEATURE_NAMES):
+            raise ValueError("Model was trained with an unknown feature set; retrain it")
         self.bundle = bundle
         self.model = bundle["model"]
         self.version = bundle["version"]
         self.threshold = bundle["threshold"]
         self.median_score = bundle["median_score"]
         self.novelty_threshold = bundle["novelty_threshold"]
-        self.p99 = np.array([bundle["feature_p99"][name] for name in FEATURE_NAMES])
+        self.p99 = np.array([bundle["feature_p99"][name] for name in self.feature_names])
 
     @classmethod
     def load(cls, path: Path | None = None) -> "AnomalyDetector | None":
@@ -106,8 +108,8 @@ class AnomalyDetector:
     def score_many(self, rows: list[dict[str, float]]) -> list[dict[str, Any]]:
         if not rows:
             return []
-        scores = self.model.score_samples(_matrix(rows, FEATURE_NAMES))
-        raw = np.array([[float(row.get(name, 0.0)) for name in FEATURE_NAMES] for row in rows])
+        scores = self.model.score_samples(_matrix(rows, self.feature_names))
+        raw = np.array([[float(row.get(name, 0.0)) for name in self.feature_names] for row in rows])
         novelty = novelty_scores(raw, self.p99)
         return [self._result(row, float(score), float(nov)) for row, score, nov in zip(rows, scores, novelty)]
 
@@ -135,15 +137,15 @@ class AnomalyDetector:
             "top_features": self.explain(row),
         }
 
-    def explain(self, row: dict[str, float], limit: int = 3) -> list[dict[str, float]]:
+    def explain(self, row: dict[str, float], limit: int | None = 3) -> list[dict[str, float]]:
         """Features that exceed the 99th percentile of the benign baseline."""
         p99 = self.bundle["feature_p99"]
         deviations = []
-        for name in FEATURE_NAMES:
+        for name in self.feature_names:
             value = float(row.get(name, 0.0))
             baseline = p99.get(name, 0.0)
             if value > baseline:
                 deviations.append({"feature": name, "value": value, "baseline_p99": baseline,
                                    "ratio": round((value + 1) / (baseline + 1), 2)})
         deviations.sort(key=lambda item: item["ratio"], reverse=True)
-        return deviations[:limit]
+        return deviations if limit is None else deviations[:limit]
