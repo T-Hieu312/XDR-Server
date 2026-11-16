@@ -23,11 +23,21 @@ SCENARIOS: dict[str, dict[str, Any]] = {
     BENIGN: {"label": "Bình thường", "mitre": []},
     "bruteforce": {"label": "Brute force đăng nhập", "mitre": ["T1110"]},
     "rdp_compromise": {"label": "Đăng nhập RDP + hậu khai thác", "mitre": ["T1021.001", "T1078", "T1059"]},
-    "sql_injection": {"label": "SQL injection / tấn công web", "mitre": ["T1190"]},
+    "sql_injection": {"label": "SQL injection", "mitre": ["T1190"]},
+    "web_attack": {"label": "Tấn công web (XSS, LFI, command injection...)", "mitre": ["T1190"]},
     "port_scan": {"label": "Quét mạng / dò dịch vụ", "mitre": ["T1046"]},
+    "dos": {"label": "Từ chối dịch vụ (DoS / flood)", "mitre": ["T1498", "T1499"]},
+    "discovery": {"label": "Thu thập thông tin hệ thống", "mitre": ["T1087", "T1082", "T1016", "T1057"]},
     "execution": {"label": "Thực thi lệnh / tải mã độc", "mitre": ["T1059", "T1105"]},
-    "persistence": {"label": "Cài cơ chế bám trụ", "mitre": ["T1547.001", "T1053.005"]},
-    "credential_access": {"label": "Đánh cắp thông tin xác thực", "mitre": ["T1003.001"]},
+    "persistence": {"label": "Cài cơ chế bám trụ", "mitre": ["T1547.001", "T1053.005", "T1543.003"]},
+    "account_manipulation": {"label": "Tạo / sửa tài khoản trái phép", "mitre": ["T1136.001", "T1098"]},
+    "credential_access": {"label": "Đánh cắp thông tin xác thực",
+                          "mitre": ["T1003.001", "T1003.002", "T1003.003"]},
+    "lateral_movement": {"label": "Di chuyển ngang (PsExec / WMI / WinRM)",
+                         "mitre": ["T1021.002", "T1047", "T1021.006", "T1569.002"]},
+    "defense_evasion": {"label": "Né tránh phòng thủ (xoá log, tắt Defender)", "mitre": ["T1070.001", "T1562.001"]},
+    "ransomware": {"label": "Ransomware (mã hoá dữ liệu, xoá bản sao lưu)", "mitre": ["T1486", "T1490"]},
+    "dns_tunneling": {"label": "DNS tunneling / rò rỉ dữ liệu qua DNS", "mitre": ["T1071.004", "T1048.003"]},
     "command_and_control": {"label": "Kết nối C2 / ra ngoài bất thường", "mitre": ["T1071", "T1568.002"]},
     UNKNOWN: {"label": "Bất thường chưa rõ loại", "mitre": []},
 }
@@ -39,9 +49,21 @@ FEATURE_SCENARIO = {
     "ids_bruteforce_count": "bruteforce",
     "rdp_logon_count": "rdp_compromise",
     "auth_success_after_failures": "rdp_compromise",
-    "ids_web_attack_count": "sql_injection",
-    "web_attack_count": "sql_injection",
+    "sqli_count": "sql_injection",
+    "ids_web_attack_count": "web_attack",
+    "web_attack_count": "web_attack",
+    "ids_dos_count": "dos",
     "ids_scan_count": "port_scan",
+    "discovery_cmd_count": "discovery",
+    "credential_dump_cmd_count": "credential_access",
+    "remote_exec_count": "lateral_movement",
+    "service_install_count": "persistence",
+    "account_change_count": "account_manipulation",
+    "defense_evasion_count": "defense_evasion",
+    "inhibit_recovery_count": "ransomware",
+    "ransom_note_count": "ransomware",
+    "max_dns_query_length": "dns_tunneling",
+    "long_dns_query_count": "dns_tunneling",
     "unique_dst_port": "port_scan",
     "unique_dst_ip": "port_scan",
     "suspicious_cmdline_count": "execution",
@@ -57,7 +79,11 @@ FEATURE_SCENARIO = {
     "max_domain_entropy": "command_and_control",
 }
 IDENTITY = {"bruteforce", "rdp_compromise"}
-POST_EXPLOITATION = {"execution", "persistence", "credential_access", "command_and_control"}
+POST_EXPLOITATION = {"execution", "persistence", "credential_access", "command_and_control", "discovery",
+                     "account_manipulation", "defense_evasion"}
+# When these appear they name the window even if other evidence is larger: they are the
+# most specific / most severe explanation (encryption beats the discovery that preceded it).
+DECISIVE = ["ransomware", "lateral_movement"]
 
 
 def scenario_info(scenario_id: str) -> dict[str, Any]:
@@ -82,7 +108,12 @@ def heuristic_scenario(deviations: list[dict[str, Any]]) -> dict[str, Any]:
 
     chain = sorted(evidence, key=evidence.get, reverse=True)
     best = chain[0]
-    if evidence.keys() & IDENTITY and evidence.keys() & POST_EXPLOITATION:
+    if "web_attack" in evidence and "sql_injection" in evidence:
+        best = "sql_injection" if best == "web_attack" else best  # SQLi is the more specific web attack
+    decisive = [name for name in DECISIVE if name in evidence]
+    if decisive:
+        best = decisive[0]
+    elif evidence.keys() & IDENTITY and evidence.keys() & POST_EXPLOITATION:
         best = "rdp_compromise"
     info = scenario_info(best)
     info["mitre"] = sorted({m for s in chain for m in SCENARIOS.get(s, {}).get("mitre", [])})

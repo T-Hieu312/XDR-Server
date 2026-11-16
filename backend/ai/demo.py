@@ -101,6 +101,18 @@ def benign_window(rng: random.Random, host: str, start: datetime) -> list[dict]:
     if rng.random() < 0.04:
         events.append(suricata(at(), "ET INFO Windows Update P2P activity", "Not Suspicious Traffic",
                                HOSTS[host], "13.107.4.50", 3))
+    # Look-alikes of attack techniques that happen on normal machines.
+    if rng.random() < 0.06:
+        events.append(edr(host, at(), "process_create", {
+            "Image": "C:\\Windows\\System32\\whoami.exe", "CommandLine": "whoami /user /fo csv /nh",
+            "ParentImage": "C:\\Program Files\\Microsoft VS Code\\Code.exe"}))
+    if rng.random() < 0.03:
+        events.append(edr(host, at(), "process_create", {
+            "Image": "C:\\Windows\\System32\\ipconfig.exe", "CommandLine": "ipconfig /all",
+            "ParentImage": "C:\\Windows\\System32\\cmd.exe"}))
+    if rng.random() < 0.05:
+        events.append(edr(host, at(), "dns_query", {
+            "QueryName": f"{uuid4().hex[:20]}.blob.core.windows.net"}))
     return events
 
 
@@ -155,15 +167,110 @@ def port_scan(rng: random.Random, host: str, start: datetime) -> list[dict]:
                      "Attempted Information Leak", ATTACKER_IP, HOSTS[host], 2) for _ in range(rng.randint(5, 40))]
 
 
+def _proc(host: str, ts: datetime, image: str, cmd: str, parent: str = "C:\\Windows\\System32\\cmd.exe") -> dict:
+    return edr(host, ts, "process_create", {"Image": f"C:\\Windows\\System32\\{image}", "CommandLine": cmd,
+                                            "ParentImage": parent})
+
+
+def discovery(rng: random.Random, host: str, start: datetime) -> list[dict]:
+    tools = [("whoami.exe", "whoami /all"), ("net.exe", "net user"), ("net.exe", "net localgroup administrators"),
+             ("systeminfo.exe", "systeminfo"), ("ipconfig.exe", "ipconfig /all"), ("nltest.exe", "nltest /dclist:"),
+             ("tasklist.exe", "tasklist /v"), ("netstat.exe", "netstat -ano"), ("arp.exe", "arp -a"),
+             ("quser.exe", "quser")]
+    return [_proc(host, start + timedelta(seconds=8 * i), image, cmd)
+            for i, (image, cmd) in enumerate(rng.sample(tools, rng.randint(4, len(tools))))]
+
+
+def lateral_movement(rng: random.Random, host: str, start: datetime) -> list[dict]:
+    """PsExec / WMI from the other workstation onto ``host``."""
+    source_ip = next(ip for name, ip in HOSTS.items() if name != host)
+    t = lambda s: start + timedelta(seconds=s)  # noqa: E731
+    events = [logon(host.lower(), t(2), True, "3", source_ip)]
+    if rng.random() < 0.5:
+        events += [wazuh(host.lower(), t(4), ["windows", "policy_changed"], "Windows: New service installed", 5,
+                         {"system": {"eventID": "7045"}, "eventdata": {"serviceName": "PSEXESVC"}}),
+                   _proc(host, t(5), "PSEXESVC.exe", "C:\\Windows\\PSEXESVC.exe", "C:\\Windows\\System32\\services.exe")]
+        parent = "C:\\Windows\\PSEXESVC.exe"
+    else:
+        parent = "C:\\Windows\\System32\\wbem\\WmiPrvSE.exe"
+    for i, (image, cmd) in enumerate([("cmd.exe", "cmd.exe /Q /c whoami"), ("cmd.exe", "cmd.exe /Q /c ipconfig"),
+                                      ("cmd.exe", "cmd.exe /Q /c net user")][:rng.randint(2, 3)]):
+        events.append(_proc(host, t(10 + 5 * i), image, cmd, parent))
+    return events
+
+
+def account_manipulation(rng: random.Random, host: str, start: datetime) -> list[dict]:
+    user = rng.choice(["support", "backup_adm", "svc_update"])
+    return [_proc(host, start, "net.exe", f"net user {user} P@ssw0rd123! /add"),
+            _proc(host, start + timedelta(seconds=5), "net.exe", f"net localgroup administrators {user} /add"),
+            wazuh(host.lower(), start + timedelta(seconds=1), ["windows", "adduser"], "User account created", 8,
+                  {"system": {"eventID": "4720"}}),
+            wazuh(host.lower(), start + timedelta(seconds=6), ["windows", "group_changed"],
+                  "Member added to security-enabled local group", 8, {"system": {"eventID": "4732"}})]
+
+
+def defense_evasion(rng: random.Random, host: str, start: datetime) -> list[dict]:
+    commands = [("wevtutil.exe", "wevtutil cl Security"), ("wevtutil.exe", "wevtutil cl System"),
+                ("WindowsPowerShell\\v1.0\\powershell.exe",
+                 "powershell Set-MpPreference -DisableRealtimeMonitoring $true"),
+                ("netsh.exe", "netsh advfirewall set allprofiles state off")]
+    events = [_proc(host, start + timedelta(seconds=6 * i), image, cmd)
+              for i, (image, cmd) in enumerate(rng.sample(commands, rng.randint(2, len(commands))))]
+    events.append(wazuh(host.lower(), start + timedelta(seconds=3), ["windows", "logs_cleared"],
+                        "The audit log was cleared", 10, {"system": {"eventID": "1102"}}))
+    return events
+
+
+def ransomware(rng: random.Random, host: str, start: datetime) -> list[dict]:
+    t = lambda s: start + timedelta(seconds=s)  # noqa: E731
+    events = [_proc(host, t(1), "vssadmin.exe", "vssadmin delete shadows /all /quiet"),
+              _proc(host, t(3), "bcdedit.exe", "bcdedit /set {default} recoveryenabled no")]
+    if rng.random() < 0.5:
+        events.append(_proc(host, t(4), "wbadmin.exe", "wbadmin delete catalog -quiet"))
+    for i in range(rng.randint(40, 250)):
+        events.append(edr(host, t(10 + i * 0.5), "file_create", {
+            "TargetFilename": f"C:\\Users\\demo\\Documents\\file{i}.docx.locked"}))
+    for folder in ("Desktop", "Documents")[:rng.randint(1, 2)]:
+        events.append(edr(host, t(140), "file_create", {"TargetFilename": f"C:\\Users\\demo\\{folder}\\HOW_TO_DECRYPT.txt"}))
+    return events
+
+
+def dns_tunneling(rng: random.Random, host: str, start: datetime) -> list[dict]:
+    domain = rng.choice(["t1.exfil-demo.test", "cdn-sync.demo.test"])
+    return [edr(host, start + timedelta(seconds=i * 1.5), "dns_query", {
+        "QueryName": f"{uuid4().hex}{uuid4().hex[:rng.randint(8, 30)]}.{uuid4().hex[:12]}.{domain}"})
+        for i in range(rng.randint(15, 120))]
+
+
+def web_attack(rng: random.Random, start: datetime) -> list[dict]:
+    signatures = ["ET WEB_SERVER Script tag in URI Possible Cross Site Scripting Attempt",
+                  "ET WEB_SERVER /etc/passwd Detected in URI (directory traversal)",
+                  "ET WEB_SERVER Possible Command Injection Attempt (cmd=)"]
+    events = [suricata(start + timedelta(seconds=rng.uniform(0, 200)), rng.choice(signatures),
+                       "Web Application Attack", ATTACKER_IP, WEB_IP, 1) for _ in range(rng.randint(5, 50))]
+    events += [wazuh(WEB_AGENT, start + timedelta(seconds=rng.uniform(0, 200)), ["web", "accesslog", "attack"],
+                     "Common web attack.", 6, srcip=ATTACKER_IP) for _ in range(rng.randint(2, 30))]
+    return events
+
+
+def dos(rng: random.Random, start: datetime) -> list[dict]:
+    signatures = ["ET DOS Possible SYN Flood", "ET DOS Inbound HTTP flood", "ET DOS Possible Slowloris attack"]
+    return [suricata(start + timedelta(seconds=rng.uniform(0, 200)), rng.choice(signatures),
+                     "Attempted Denial of Service", ATTACKER_IP, WEB_IP, 2) for _ in range(rng.randint(10, 120))]
+
+
+ENDPOINT_SCENARIOS = {"bruteforce": bruteforce, "rdp_compromise": rdp_compromise, "port_scan": port_scan,
+                      "discovery": discovery, "lateral_movement": lateral_movement,
+                      "account_manipulation": account_manipulation, "defense_evasion": defense_evasion,
+                      "ransomware": ransomware, "dns_tunneling": dns_tunneling}
+WEB_SCENARIOS = {"sql_injection": sql_injection, "web_attack": web_attack, "dos": dos}
+
+
 def run_scenario(rng: random.Random, scenario: str, start: datetime) -> tuple[str, list[dict]]:
+    if scenario in WEB_SCENARIOS:
+        return WEB_HOST, WEB_SCENARIOS[scenario](rng, start)
     host = rng.choice(list(HOSTS))
-    if scenario == "bruteforce":
-        return host, bruteforce(rng, host, start)
-    if scenario == "rdp_compromise":
-        return host, rdp_compromise(rng, host, start)
-    if scenario == "sql_injection":
-        return WEB_HOST, sql_injection(rng, start)
-    return host, port_scan(rng, host, start)
+    return host, ENDPOINT_SCENARIOS[scenario](rng, host, start)
 
 
 def main() -> None:
@@ -172,8 +279,8 @@ def main() -> None:
     parser.add_argument("--model", type=Path, default=Path("data/demo_model.joblib"))
     parser.add_argument("--scenario-model", type=Path, default=Path("data/demo_scenarios.joblib"))
     parser.add_argument("--assets", type=Path, default=Path("data/demo_assets.json"))
-    parser.add_argument("--hours", type=int, default=36, help="Hours of history to generate")
-    parser.add_argument("--runs-per-scenario", type=int, default=12)
+    parser.add_argument("--hours", type=int, default=40, help="Hours of history to generate")
+    parser.add_argument("--runs-per-scenario", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
@@ -213,13 +320,15 @@ def main() -> None:
         start += timedelta(minutes=5)
 
     # Labelled attack runs in the second half of the history (lab exercises, times written down).
-    scenarios = ["bruteforce", "rdp_compromise", "sql_injection", "port_scan"]
+    scenarios = [*ENDPOINT_SCENARIOS, *WEB_SCENARIOS]
     runs, attack_events = [], []
-    slots = int((live_start - baseline_end).total_seconds() // 1200) - 1   # one run per 20 minutes
+    slots = int((live_start - baseline_end).total_seconds() // 600) - 1   # one run per 10 minutes
     order = [s for s in scenarios for _ in range(args.runs_per_scenario)]
     rng.shuffle(order)
+    if len(order) > slots:
+        print(f"WARNING: only {slots} of {len(order)} runs fit; increase --hours")
     for index, scenario in enumerate(order[:slots]):
-        run_start = baseline_end + timedelta(minutes=20 * index + 5, seconds=rng.randint(0, 60))
+        run_start = baseline_end + timedelta(minutes=10 * index + 2, seconds=rng.randint(0, 40))
         host, events = run_scenario(rng, scenario, run_start)
         attack_events += events
         # Like the lab operator: write down when the attack started and when it finished.
@@ -253,10 +362,15 @@ def main() -> None:
 
     # Live attack chain on PC-01 and SQL injection on the web server, then run the AI.
     rules, iocs = load_detection_content()
-    live = (port_scan(rng, "DEMO-PC-01", current_window - timedelta(minutes=50))
-            + bruteforce(rng, "DEMO-PC-01", current_window - timedelta(minutes=35))
-            + rdp_compromise(rng, "DEMO-PC-01", current_window - timedelta(minutes=20))
-            + sql_injection(rng, current_window - timedelta(minutes=25)))
+    ago = lambda minutes: current_window - timedelta(minutes=minutes)  # noqa: E731
+    live = (dns_tunneling(rng, "DEMO-PC-02", ago(55))
+            + port_scan(rng, "DEMO-PC-01", ago(50))
+            + dos(rng, ago(40))
+            + bruteforce(rng, "DEMO-PC-01", ago(35))
+            + sql_injection(rng, ago(25))
+            + rdp_compromise(rng, "DEMO-PC-01", ago(20))
+            + lateral_movement(rng, "DEMO-PC-02", ago(15))   # from PC-01 onto PC-02
+            + ransomware(rng, "DEMO-PC-02", ago(10)))
     for event in live:
         save_event_with_alerts(event, detect_event(event, rules, iocs))
     result = analyze_pending(now=now, lookback_minutes=120, grace_seconds=60)

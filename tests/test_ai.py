@@ -270,6 +270,88 @@ def test_multi_source_features_capture_bruteforce_rdp_and_sqli() -> None:
     assert win["ids_alert_count"] == 2 and win["ids_scan_count"] == 2 and win["ids_bruteforce_count"] == 1
     assert win["ids_attacker_count"] == 1
     assert web["ids_web_attack_count"] == 1 and web["web_attack_count"] == 1
+    assert web["sqli_count"] == 2  # Suricata UNION SELECT + Wazuh sql_injection rule
+
+
+def _proc(image: str, cmd: str, parent: str = "C:\\Windows\\explorer.exe") -> dict:
+    return edr_event("process_create", {"Image": f"C:\\Windows\\System32\\{image}", "CommandLine": cmd,
+                                        "ParentImage": parent})
+
+
+def test_endpoint_technique_features() -> None:
+    attack = [
+        _proc("whoami.exe", "whoami /all"), _proc("net.exe", "net user"), _proc("net1.exe", "net1 user"),
+        _proc("systeminfo.exe", "systeminfo"), _proc("nltest.exe", "nltest /dclist:"),
+        _proc("reg.exe", "reg save HKLM\\SAM C:\\Users\\Public\\sam"),
+        _proc("rundll32.exe", "rundll32.exe C:\\Windows\\System32\\comsvcs.dll, MiniDump 640 l.dmp full"),
+        _proc("cmd.exe", "cmd.exe /Q /c hostname", "C:\\Windows\\System32\\wbem\\WmiPrvSE.exe"),
+        _proc("PSEXESVC.exe", "PSEXESVC.exe"),
+        _proc("sc.exe", "sc \\\\10.10.20.101 create upd binPath= C:\\t.exe"),
+        _proc("net.exe", "net user backdoor P@ssw0rd! /add"),
+        _proc("net.exe", "net localgroup administrators backdoor /add"),
+        _proc("wevtutil.exe", "wevtutil cl Security"),
+        _proc("WindowsPowerShell\\v1.0\\powershell.exe", "powershell Set-MpPreference -DisableRealtimeMonitoring $true"),
+        _proc("vssadmin.exe", "vssadmin delete shadows /all /quiet"),
+        _proc("bcdedit.exe", "bcdedit /set {default} recoveryenabled no"),
+        edr_event("file_create", {"TargetFilename": "C:\\Users\\a\\Desktop\\HOW_TO_DECRYPT.txt"}),
+        edr_event("file_create", {"TargetFilename": "C:\\Users\\a\\Documents\\report.docx.locked"}),
+        edr_event("dns_query", {"QueryName": "aGVsbG8gd29ybGQgdGhpcyBpcyBleGZpbHRyYXRpb24gZGF0YQ.t.evil.test"}),
+    ]
+    f = window_features(attack)
+    assert f["discovery_cmd_count"] == 4  # whoami, net (net1 counted as net), systeminfo, nltest
+    assert f["credential_dump_cmd_count"] == 2
+    assert f["remote_exec_count"] == 2  # shell spawned by WMI + PsExec service
+    assert f["service_install_count"] == 1 and f["account_change_count"] == 2
+    assert f["defense_evasion_count"] == 2 and f["inhibit_recovery_count"] == 2
+    assert f["ransom_note_count"] == 2 and f["long_dns_query_count"] == 1 and f["max_dns_query_length"] > 60
+
+    # Benign look-alikes must stay at zero.
+    benign = window_features([
+        _proc("whoami.exe", "whoami /user /fo csv /nh", "C:\\Program Files\\Microsoft VS Code\\Code.exe"),
+        _proc("wevtutil.exe", "wevtutil.exe im C:\\app\\manifest.man"),
+        _proc("WmiPrvSE.exe", "wmiprvse.exe -Embedding", "C:\\Windows\\System32\\svchost.exe"),
+        edr_event("file_create", {"TargetFilename": "C:\\proj\\node_modules\\pkg\\README.md"}),
+        edr_event("dns_query", {"QueryName": "update.code.visualstudio.com"}),
+    ])
+    for name in ("credential_dump_cmd_count", "remote_exec_count", "service_install_count", "account_change_count",
+                 "defense_evasion_count", "inhibit_recovery_count", "ransom_note_count", "long_dns_query_count"):
+        assert benign[name] == 0, name
+    assert benign["discovery_cmd_count"] == 1
+
+
+def test_wazuh_and_suricata_technique_features() -> None:
+    assets = AssetMap(LAB_ASSETS)
+    events = [wazuh_event("4720", T0, groups=["windows", "adduser"]),
+              wazuh_event("4732", T0, groups=["windows", "group_changed"]),
+              wazuh_event("7045", T0, groups=["windows", "policy_changed"]),
+              wazuh_event("1102", T0, groups=["windows", "logs_cleared"]),
+              suricata_event("ET DOS Possible SYN Flood", T0, dst="10.10.50.20"),
+              suricata_event("ET SCAN Suspicious inbound to MSSQL port 1433", T0, dst="10.10.50.20")]
+    windows = {host: window_features(items) for (host, _), items in group_windows(events, assets=assets).items()}
+    assert windows["WIN10-01"]["account_change_count"] == 2
+    assert windows["WIN10-01"]["service_install_count"] == 1 and windows["WIN10-01"]["defense_evasion_count"] == 1
+    assert windows["WEB-SRV"]["ids_dos_count"] == 1
+    assert windows["WEB-SRV"]["sqli_count"] == 0 and windows["WEB-SRV"]["ids_web_attack_count"] == 0
+
+
+def test_heuristic_names_the_new_scenarios() -> None:
+    def dev(*features: str) -> list[dict]:
+        return [{"feature": name, "value": 3, "baseline_p99": 0, "ratio": 4} for name in features]
+
+    expected = {
+        ("discovery_cmd_count",): "discovery",
+        ("remote_exec_count", "discovery_cmd_count", "shell_process_count"): "lateral_movement",
+        ("account_change_count",): "account_manipulation",
+        ("defense_evasion_count",): "defense_evasion",
+        ("inhibit_recovery_count", "file_create_count", "discovery_cmd_count"): "ransomware",
+        ("long_dns_query_count", "max_dns_query_length"): "dns_tunneling",
+        ("ids_dos_count",): "dos",
+        ("credential_dump_cmd_count",): "credential_access",
+    }
+    for features, scenario in expected.items():
+        result = heuristic_scenario(dev(*features))
+        assert result["id"] == scenario, (features, result["id"])
+    assert "T1490" in heuristic_scenario(dev("inhibit_recovery_count"))["mitre"]
 
 
 def test_heuristic_names_the_scenario_from_deviating_features() -> None:
@@ -277,7 +359,8 @@ def test_heuristic_names_the_scenario_from_deviating_features() -> None:
         return {"feature": feature, "value": 1, "baseline_p99": 0, "ratio": ratio}
 
     assert heuristic_scenario([dev("auth_failure_count", 31)])["id"] == "bruteforce"
-    assert heuristic_scenario([dev("ids_web_attack_count", 4), dev("web_attack_count", 3)])["id"] == "sql_injection"
+    assert heuristic_scenario([dev("ids_web_attack_count", 4), dev("web_attack_count", 3)])["id"] == "web_attack"
+    assert heuristic_scenario([dev("ids_web_attack_count", 9), dev("sqli_count", 2)])["id"] == "sql_injection"
     chain = heuristic_scenario([dev("rdp_logon_count", 2), dev("suspicious_cmdline_count", 3),
                                 dev("persistence_registry_count", 2)])
     assert chain["id"] == "rdp_compromise" and {"T1021.001", "T1547.001"} <= set(chain["mitre"])

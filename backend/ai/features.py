@@ -47,6 +47,21 @@ FEATURE_NAMES = [
     "ids_attacker_count",
     # web server logs (Wazuh web/accesslog rules)
     "web_attack_count",
+    # attack techniques in command lines / Windows events (EDR + Wazuh)
+    "discovery_cmd_count",
+    "credential_dump_cmd_count",
+    "remote_exec_count",
+    "service_install_count",
+    "account_change_count",
+    "defense_evasion_count",
+    "inhibit_recovery_count",
+    "ransom_note_count",
+    # DNS tunnelling (Sysmon 22)
+    "max_dns_query_length",
+    "long_dns_query_count",
+    # network attacks (Suricata + Wazuh)
+    "sqli_count",
+    "ids_dos_count",
 ]
 
 SHELLS = {"powershell.exe", "pwsh.exe", "cmd.exe", "powershell_ise.exe"}
@@ -76,6 +91,46 @@ IDS_BRUTEFORCE = re.compile(r"(?i)(brute|password guess|login attempt|failed log
 IDS_WEB_ATTACK = re.compile(r"(?i)(sql.?injection|\bsqli\b|union\s+(all\s+)?select|sqlmap|select\s+sleep|"
                             r"xss|cross.site|web_server|web_specific|directory traversal|command injection|"
                             r"\blfi\b|\brfi\b|web application attack)")
+SQLI = re.compile(r"(?i)(sql.?injection|\bsqli\b|union\s+(all\s+)?select|sqlmap|select\s+sleep)")
+IDS_DOS = re.compile(r"(?i)(\bdos\b|ddos|flood|slowloris|denial.of.service)")
+
+# Discovery: distinct tools per window, so one benign "whoami" from an IDE stays low.
+DISCOVERY_TOOLS = {"whoami.exe", "net.exe", "net1.exe", "ipconfig.exe", "systeminfo.exe", "nltest.exe",
+                   "quser.exe", "qwinsta.exe", "tasklist.exe", "arp.exe", "netstat.exe", "route.exe",
+                   "nslookup.exe", "dsquery.exe", "hostname.exe", "query.exe", "klist.exe", "cmdkey.exe"}
+DISCOVERY_PS = re.compile(r"(?i)(get-(aduser|adcomputer|addomain|adgroupmember|localuser|localgroupmember|"
+                          r"netipconfiguration|nettcpconnection|process|wmiobject\s+win32_(computersystem|"
+                          r"operatingsystem|useraccount)))")
+CREDENTIAL_DUMP = re.compile(r"(?i)(reg(\.exe)?\s+save\s+hklm\\(sam|system|security)|ntdsutil|sekurlsa|lsadump|"
+                             r"mimikatz|comsvcs(\.dll)?.{0,4}(#24|minidump)|procdump(64)?(\.exe)?\s.*lsass|"
+                             r"\\ntds\\ntds\.dit|invoke-mimikatz|out-minidump)")
+REMOTE_EXEC_PARENTS = {"wmiprvse.exe", "wsmprovhost.exe", "winrshost.exe", "psexesvc.exe", "paexesvc.exe"}
+REMOTE_EXEC_IMAGES = {"psexesvc.exe", "paexesvc.exe", "remcomsvc.exe"}
+REMOTE_EXEC_CMD = re.compile(r"(?i)(wmic(\.exe)?\s+/node:|invoke-(command|wmimethod)\s.*-computername|"
+                             r"enter-pssession|new-pssession|psexec(64)?(\.exe)?\s+\\\\|paexec|"
+                             r"winrs(\.exe)?\s+-r:|copy\s.*\\\\[\w.-]+\\(admin|c)\$)")
+SERVICE_INSTALL_CMD = re.compile(r"(?i)(\bsc(\.exe)?\s+(\\\\\S+\s+)?create\b|new-service\b)")
+ACCOUNT_CHANGE_CMD = re.compile(r"(?i)(\bnet1?(\.exe)?\s+(user|localgroup|group)\s.*\s/add\b|new-localuser|"
+                                r"add-localgroupmember|new-aduser|add-adgroupmember)")
+DEFENSE_EVASION_CMD = re.compile(r"(?i)(wevtutil(\.exe)?\s+(cl|clear-log)\b|clear-eventlog|remove-eventlog|"
+                                 r"set-mppreference\s.*-disable\w*\s+(\$?true|1)|add-mppreference\s.*-exclusion|"
+                                 r"\bsc(\.exe)?\s+(stop|config|delete)\s+windefend|"
+                                 r"netsh(\.exe)?\s+(adv)?firewall\s+set\s.*state\s+off|auditpol(\.exe)?\s.*/clear|"
+                                 r"fsutil(\.exe)?\s+usn\s+deletejournal)")
+INHIBIT_RECOVERY_CMD = re.compile(r"(?i)(vssadmin(\.exe)?\s+(delete|resize)\s+shadows?|"
+                                  r"wmic(\.exe)?\s+shadowcopy\s+delete|win32_shadowcopy.*delete|"
+                                  r"bcdedit(\.exe)?\s.*(recoveryenabled\s+no|bootstatuspolicy\s+ignoreallfailures)|"
+                                  r"wbadmin(\.exe)?\s+delete\s+(catalog|systemstatebackup|backup))")
+# Ransom notes and typical encrypted-file extensions ("readme" alone is far too common).
+RANSOM_FILE = re.compile(r"(?i)((decrypt|ransom|restore[_ -]?(my[_ -]?)?files|recover[_ -]?files|"
+                         r"how[_ -]?to[_ -]?(decrypt|restore|recover))[^\\]*\.(txt|html?|hta)$|"
+                         r"\.(locked|encrypted|crypted|crypt|wncry|lockbit|ryk|enc)$)")
+WAZUH_ACCOUNT_EVENTS = {"4720", "4722", "4724", "4728", "4732", "4738", "4756"}
+WAZUH_ACCOUNT_GROUPS = {"adduser", "account_changed", "group_changed"}
+WAZUH_SERVICE_EVENTS = {"7045", "4697"}
+WAZUH_LOG_CLEARED_EVENTS = {"1102", "104"}
+LONG_DNS_LABEL = 40
+LONG_DNS_QUERY = 100
 
 
 def parse_timestamp(value: Any) -> datetime | None:
@@ -178,6 +233,7 @@ def window_features(events: Iterable[dict[str, Any]]) -> dict[str, float]:
     domains: set[str] = set()
     auth_sources: set[str] = set()
     attackers: set[str] = set()
+    discovery_tools: set[str] = set()
     auth_successes = 0
 
     for event in events:
@@ -197,6 +253,10 @@ def window_features(events: Iterable[dict[str, Any]]) -> dict[str, float]:
                     f["ids_bruteforce_count"] += 1
                 if IDS_WEB_ATTACK.search(text):
                     f["ids_web_attack_count"] += 1
+                if SQLI.search(text):
+                    f["sqli_count"] += 1
+                if IDS_DOS.search(text):
+                    f["ids_dos_count"] += 1
                 if event.get("_peer_ip"):
                     attackers.add(str(event["_peer_ip"]))
             continue
@@ -216,8 +276,17 @@ def window_features(events: Iterable[dict[str, Any]]) -> dict[str, float]:
             web_rule = ("web" in groups or "accesslog" in groups) and groups & WAZUH_WEB_ATTACK_GROUPS
             if web_rule or "sql injection" in description or "xss" in description:
                 f["web_attack_count"] += 1
+                if "sql_injection" in groups or "sql injection" in description:
+                    f["sqli_count"] += 1
                 if usable_ip:
                     attackers.add(source_ip)
+            windows_event = eventdata["_event_id"]
+            if windows_event in WAZUH_ACCOUNT_EVENTS or groups & WAZUH_ACCOUNT_GROUPS:
+                f["account_change_count"] += 1
+            if windows_event in WAZUH_SERVICE_EVENTS:
+                f["service_install_count"] += 1
+            if windows_event in WAZUH_LOG_CLEARED_EVENTS or "logs_cleared" in groups:
+                f["defense_evasion_count"] += 1
             continue
 
         if event_type == "process_create":
@@ -236,8 +305,28 @@ def window_features(events: Iterable[dict[str, Any]]) -> dict[str, float]:
             f["max_cmdline_length"] = max(f["max_cmdline_length"], float(len(command_line)))
             if any(directory in image for directory in USER_WRITABLE_DIRS):
                 f["user_writable_exec_count"] += 1
-            if _basename(data.get("ParentImage")) in OFFICE_PARENTS:
+            parent = _basename(data.get("ParentImage"))
+            if parent in OFFICE_PARENTS:
                 f["office_spawn_count"] += 1
+            if name in DISCOVERY_TOOLS:
+                discovery_tools.add("net.exe" if name == "net1.exe" else name)
+            for match in DISCOVERY_PS.finditer(command_line):
+                discovery_tools.add(match.group(1).lower().split()[0])
+            if CREDENTIAL_DUMP.search(command_line):
+                f["credential_dump_cmd_count"] += 1
+            # Executed remotely (PsExec service, WMI, WinRM) or launching remote execution.
+            if (name in REMOTE_EXEC_IMAGES
+                    or (parent in REMOTE_EXEC_PARENTS and (name in SHELLS or name in LOLBINS or name in DISCOVERY_TOOLS))
+                    or REMOTE_EXEC_CMD.search(command_line)):
+                f["remote_exec_count"] += 1
+            if SERVICE_INSTALL_CMD.search(command_line):
+                f["service_install_count"] += 1
+            if ACCOUNT_CHANGE_CMD.search(command_line):
+                f["account_change_count"] += 1
+            if DEFENSE_EVASION_CMD.search(command_line):
+                f["defense_evasion_count"] += 1
+            if INHIBIT_RECOVERY_CMD.search(command_line):
+                f["inhibit_recovery_count"] += 1
 
         elif event_type == "network_connect":
             f["network_connect_count"] += 1
@@ -255,11 +344,17 @@ def window_features(events: Iterable[dict[str, Any]]) -> dict[str, float]:
             if domain:
                 domains.add(domain)
                 f["max_domain_entropy"] = max(f["max_domain_entropy"], _entropy(domain.split(".")[0]))
+                f["max_dns_query_length"] = max(f["max_dns_query_length"], float(len(domain)))
+                if len(domain) >= LONG_DNS_QUERY or max(len(label) for label in domain.split(".")) >= LONG_DNS_LABEL:
+                    f["long_dns_query_count"] += 1
 
         elif event_type == "file_create":
             f["file_create_count"] += 1
-            if str(data.get("TargetFilename") or "").lower().endswith(EXECUTABLE_EXTENSIONS):
+            target = str(data.get("TargetFilename") or "").lower()
+            if target.endswith(EXECUTABLE_EXTENSIONS):
                 f["executable_file_create_count"] += 1
+            if RANSOM_FILE.search(target):
+                f["ransom_note_count"] += 1
 
         elif event_type == "registry_set":
             f["registry_set_count"] += 1
@@ -276,6 +371,7 @@ def window_features(events: Iterable[dict[str, Any]]) -> dict[str, float]:
     f["auth_failure_src_count"] = float(len(auth_sources))
     f["auth_success_after_failures"] = 1.0 if auth_successes and f["auth_failure_count"] >= 3 else 0.0
     f["ids_attacker_count"] = float(len(attackers))
+    f["discovery_cmd_count"] = float(len(discovery_tools))
     f["unique_process_images"] = float(len(images))
     f["unique_dst_ip"] = float(len(dst_ips))
     f["unique_dst_port"] = float(len(dst_ports))

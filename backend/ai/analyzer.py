@@ -39,8 +39,23 @@ FEATURE_MITRE_HINTS = {
     "ids_scan_count": "T1046",
     "ids_web_attack_count": "T1190",
     "web_attack_count": "T1190",
+    "sqli_count": "T1190",
+    "ids_dos_count": "T1498",
+    "discovery_cmd_count": "T1087",
+    "credential_dump_cmd_count": "T1003",
+    "remote_exec_count": "T1021.002",
+    "service_install_count": "T1543.003",
+    "account_change_count": "T1136.001",
+    "defense_evasion_count": "T1070.001",
+    "inhibit_recovery_count": "T1490",
+    "ransom_note_count": "T1486",
+    "long_dns_query_count": "T1071.004",
+    "max_dns_query_length": "T1048.003",
 }
-HIGH_SEVERITY_SCENARIOS = {"rdp_compromise", "credential_access", "sql_injection", "command_and_control"}
+HIGH_SEVERITY_SCENARIOS = {"rdp_compromise", "credential_access", "sql_injection", "command_and_control",
+                           "lateral_movement", "ransomware", "defense_evasion", "account_manipulation",
+                           "dns_tunneling", "dos"}
+CRITICAL_SCENARIOS = {"ransomware"}
 
 _lock = threading.Lock()
 _cache: dict[str, tuple[tuple[str, float], Any]] = {}
@@ -109,7 +124,8 @@ def build_anomaly_alert(host_id: str, result: dict[str, Any], event_id: str) -> 
     return {
         "rule_id": "ai-anomaly",
         "title": f"AI: {scenario['label']} trên {host_id} ({reason})",
-        "severity": "high" if score >= 0.8 or scenario["id"] in HIGH_SEVERITY_SCENARIOS else "medium",
+        "severity": ("critical" if scenario["id"] in CRITICAL_SCENARIOS
+                     else "high" if score >= 0.8 or scenario["id"] in HIGH_SEVERITY_SCENARIOS else "medium"),
         "confidence": 0.8,
         "mitre_attack": sorted(mitre),
         "event_id": event_id,

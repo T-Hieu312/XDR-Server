@@ -41,6 +41,18 @@ const AI_FEATURE_LABELS = {
   ids_web_attack_count: "IDS: tấn công web / SQLi",
   ids_attacker_count: "Số IP tấn công",
   web_attack_count: "Log web: tấn công (Wazuh)",
+  discovery_cmd_count: "Lệnh thu thập thông tin",
+  credential_dump_cmd_count: "Lệnh dump mật khẩu (SAM/LSASS)",
+  remote_exec_count: "Thực thi từ xa (PsExec/WMI)",
+  service_install_count: "Cài service mới",
+  account_change_count: "Tạo / sửa tài khoản",
+  defense_evasion_count: "Xoá log / tắt Defender",
+  inhibit_recovery_count: "Xoá shadow copy / backup",
+  ransom_note_count: "File mã hoá / ghi chú tống tiền",
+  max_dns_query_length: "Truy vấn DNS dài nhất",
+  long_dns_query_count: "Truy vấn DNS bất thường dài",
+  sqli_count: "SQL injection (IDS + log web)",
+  ids_dos_count: "IDS: DoS / flood",
 };
 const AI_SCENARIO_SOURCES = {
   classifier: "Bộ phân loại (tầng 2)",
