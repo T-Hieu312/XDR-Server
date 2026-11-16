@@ -235,6 +235,26 @@ Suricata┘   (rules/assets.json)                  └─ Tầng 2: Random Fores
 - **Tầng 2** (`ai/scenarios.py`): Random Forest (class_weight cân bằng) phân loại cửa sổ thành `benign` hoặc một kịch bản. Chỉ báo kịch bản khi độ tin cậy ≥ `min_confidence` (mặc định 0,6). Khi chưa train tầng 2, tên kịch bản được **suy luận từ các feature vượt baseline** (ví dụ đăng nhập sai → brute force; đăng nhập RDP + lệnh đáng ngờ → chuỗi RDP + hậu khai thác).
 - **Chạy nền**: server tự chấm các cửa sổ đã đóng mỗi `XDR_AI_INTERVAL_SECONDS` giây. Chưa có model thì AI tự tắt, hệ thống vẫn chạy bình thường.
 
+### Các kịch bản AI nhận diện
+
+| `scenario` (dùng trong CSV) | Kịch bản | Nguồn dữ liệu chính | Cách chạy thử trong lab | MITRE |
+|---|---|---|---|---|
+| `bruteforce` | Brute force đăng nhập | Wazuh 4625, Suricata | `hydra -l administrator -P pass.txt rdp://10.10.20.100` | T1110 |
+| `rdp_compromise` | Đăng nhập RDP + hậu khai thác | Wazuh 4624 loại 10 + EDR | `xfreerdp` vào máy rồi chạy `whoami`, PowerShell `-enc`, `certutil` | T1021.001, T1078 |
+| `port_scan` | Quét mạng | Suricata | `nmap -sS -sV 10.10.20.100` | T1046 |
+| `sql_injection` | SQL injection | Suricata, log web (Wazuh) | `sqlmap -u "http://10.10.50.20/dvwa/vulnerabilities/sqli/?id=1" --batch` | T1190 |
+| `web_attack` | XSS, LFI, command injection | Suricata, log web (Wazuh) | DVWA: XSS, File Inclusion, Command Injection | T1190 |
+| `dos` | DoS / flood | Suricata | `hping3 -S --flood -p 80 10.10.50.20` (ngắn, trong lab) | T1498, T1499 |
+| `discovery` | Thu thập thông tin | EDR | Atomic T1087.001, T1082, T1016 (`whoami /all`, `net user`, `systeminfo`, `nltest`) | T1087, T1082 |
+| `lateral_movement` | PsExec / WMI / WinRM | EDR + Wazuh 7045, 4624 loại 3 | `psexec \\10.10.20.101 cmd`, `wmic /node:10.10.20.101 process call create` | T1021.002, T1047 |
+| `account_manipulation` | Tạo / sửa tài khoản | EDR + Wazuh 4720, 4732 | `net user test P@ss123 /add` + `net localgroup administrators test /add` | T1136.001, T1098 |
+| `credential_access` | Dump mật khẩu | EDR (Sysmon 10, lệnh) | `reg save HKLM\SAM`, `rundll32 comsvcs.dll MiniDump` (Atomic T1003.001/.002) | T1003 |
+| `defense_evasion` | Xoá log, tắt Defender | EDR + Wazuh 1102 | `wevtutil cl Security`, `Set-MpPreference -DisableRealtimeMonitoring $true` | T1070.001, T1562.001 |
+| `ransomware` | Mã hoá + xoá bản sao lưu | EDR | Atomic T1490 (`vssadmin delete shadows`) + T1486; **chỉ chạy trên VM đã snapshot** | T1486, T1490 |
+| `dns_tunneling` | Rò rỉ dữ liệu qua DNS | EDR (Sysmon 22) | Atomic T1071.004 hoặc `dnscat2` tới máy Kali | T1071.004, T1048.003 |
+
+Ngoài ra AI còn gọi tên `execution`, `persistence`, `command_and_control` khi suy luận từ feature, và `unknown` cho bất thường chưa rõ loại.
+
 ### Quy trình trong lab
 
 1. **Baseline sạch (tầng 1)**: chạy EDR agent, Wazuh, Suricata, dùng các máy bình thường vài ngày (không tấn công), rồi train:
