@@ -217,7 +217,7 @@ Rule Suricata chỉ tạo alert cho event có `alert.signature` và severity 1 h
 
 Wazuh và Suricata cũng có endpoint tiếp nhận riêng tại `/api/collectors/wazuh/events` và `/api/collectors/suricata/events`. Khóa của mỗi collector được cấu hình độc lập bằng `XDR_WAZUH_INGEST_KEY` và `XDR_SURICATA_INGEST_KEY`.
 
-> Endpoint response chỉ tạo yêu cầu chờ admin khác phê duyệt; hệ thống hiện chưa thực thi lệnh cô lập host, dừng process hoặc chặn IP trên endpoint/firewall.
+> Endpoint response phát lệnh tới EDR agent Windows sau khi admin khác người tạo phê duyệt. Agent cần chạy bằng quyền Administrator. Có thể dừng process, chặn IP bằng Windows Firewall, cô lập host (giữ kết nối outbound tới XDR) và khôi phục firewall bằng yêu cầu riêng. Chỉ thử trong VM/lab; API và agent cần kết nối HTTPS/VPN ngoài lab.
 
 ## 4.1. AI phát hiện và nhận diện kịch bản tấn công
 

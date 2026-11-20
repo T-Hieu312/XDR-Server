@@ -107,6 +107,17 @@ def init_db() -> None:
             )"""
         )
 
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS response_executions (
+                request_id TEXT NOT NULL REFERENCES response_requests(request_id) ON DELETE CASCADE,
+                agent_id TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
+                result TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (request_id, agent_id)
+            )"""
+        )
+
 
         connection.execute(
             """CREATE TABLE IF NOT EXISTS ai_windows (

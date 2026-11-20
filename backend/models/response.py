@@ -55,3 +55,4 @@ class ResponseRequest(BaseModel):
     review_note: str | None
     created_at: datetime
     updated_at: datetime
+    executions: list[dict[str, str | None]] = Field(default_factory=list)

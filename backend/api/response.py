@@ -1,14 +1,19 @@
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from pydantic import BaseModel, Field
 
 from api.security import require_roles
 from database.response import (
+    claim_agent_commands,
+    agent_owns_host,
     create_response_request,
+    finish_agent_command,
     host_is_observed,
     list_response_requests,
     review_response_request,
 )
+from api.agent_auth import authenticate_agent
 from models.response import (
     BlockIPRequest,
     HostResponseRequest,
@@ -22,6 +27,41 @@ router = APIRouter(
     tags=["response"],
     dependencies=[Depends(require_roles("admin"))],
 )
+agent_router = APIRouter(prefix="/api/agent", tags=["agent response"])
+
+
+class CommandResult(BaseModel):
+    request_id: str
+    success: bool
+    result: str = Field(max_length=1000)
+
+
+@agent_router.get("/commands")
+def get_agent_commands(
+    x_agent_id: str = Header(...),
+    x_agent_key: str = Header(...),
+    x_host_id: str = Header(...),
+) -> dict[str, list[dict[str, object]]]:
+    agent_id, host_id = x_agent_id.strip(), x_host_id.strip()
+    if not agent_id or len(agent_id) > 128 or not host_id or len(host_id) > 255:
+        raise HTTPException(status_code=400, detail="Invalid agent or host ID")
+    authenticate_agent(agent_id, x_agent_key)
+    if not agent_owns_host(agent_id, host_id):
+        raise HTTPException(status_code=403, detail="Agent is not registered for this host")
+    return {"commands": claim_agent_commands(agent_id, host_id)}
+
+
+@agent_router.post("/commands/result")
+def report_agent_command(
+    result: CommandResult,
+    x_agent_id: str = Header(...),
+    x_agent_key: str = Header(...),
+) -> dict[str, bool]:
+    agent_id = x_agent_id.strip()
+    authenticate_agent(agent_id, x_agent_key)
+    if not finish_agent_command(result.request_id, agent_id, result.success, result.result):
+        raise HTTPException(status_code=404, detail="Command execution not found or already reported")
+    return {"accepted": True}
 
 
 def _require_observed_host(host_id: str) -> None:
@@ -79,6 +119,17 @@ def request_isolate_host(
         {"host_id": request.host_id},
         request.reason,
         requester["user_id"],
+    )
+
+
+@router.post("/restore-host", response_model=ResponseRequest, status_code=status.HTTP_202_ACCEPTED)
+def request_restore_host(
+    request: HostResponseRequest,
+    requester: dict[str, Any] = Depends(require_roles("admin")),
+) -> dict[str, Any]:
+    _require_observed_host(request.host_id)
+    return create_response_request(
+        "isolate_host", {"host_id": request.host_id, "operation": "restore"}, request.reason, requester["user_id"]
     )
 
 

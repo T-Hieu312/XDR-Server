@@ -14,6 +14,7 @@ from api.alerts import router as alerts_router
 from api.events import router as events_router
 from api.hosts import router as hosts_router
 from api.incidents import router as incidents_router
+from api.response import agent_router as agent_response_router
 from api.response import router as response_router
 from api.users import router as users_router
 from database.database import init_db
@@ -79,5 +80,6 @@ app.include_router(alerts_router)
 app.include_router(incidents_router)
 app.include_router(hosts_router)
 app.include_router(response_router)
+app.include_router(agent_response_router)
 app.include_router(users_router)
 app.include_router(ai_router)

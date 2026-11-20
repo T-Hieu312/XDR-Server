@@ -247,10 +247,10 @@
         <div><span class="eyebrow">TWO-PERSON APPROVAL</span><h2 id="response-title">Yêu cầu phản ứng sự cố</h2></div>
         <button class="dialog-close" id="response-close" type="button" aria-label="Đóng">×</button>
       </div>
-      <p class="role-help">Tạo yêu cầu chỉ ghi vào hàng đợi, không thực thi trên máy hoặc firewall. Admin khác phải duyệt hoặc từ chối.</p>
+      <p class="role-help">Yêu cầu chỉ được gửi tới agent sau khi admin khác người tạo duyệt. Agent Windows cần chạy bằng quyền Administrator.</p>
       <div class="auth-error" id="response-error" role="alert" hidden></div>
       <form class="user-create-form" id="response-create-form">
-        <label>Hành động<select name="action" id="response-action"><option value="isolate-host">Cô lập host</option><option value="kill-process">Dừng process</option><option value="block-ip">Chặn IP</option></select></label>
+        <label>Hành động<select name="action" id="response-action"><option value="isolate-host">Cô lập host</option><option value="restore-host">Khôi phục firewall</option><option value="kill-process">Dừng process</option><option value="block-ip">Chặn IP trên agent</option></select></label>
         <label data-response-field="host_id">Host ID<input name="host_id" maxlength="255" /></label>
         <label data-response-field="process_id" hidden>Process ID<input name="process_id" type="number" min="1" max="4294967295" /></label>
         <label data-response-field="ip_address" hidden>Địa chỉ IP<input name="ip_address" /></label>

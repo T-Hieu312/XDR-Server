@@ -359,13 +359,15 @@ async function loadResponseRequests() {
     isolate_host: "Cô lập host",
   };
   byId("response-requests-body").innerHTML = requests.map((request) => {
+    const actionName = request.action === "isolate_host" && request.target.operation === "restore" ? "Khôi phục firewall" : request.action;
     const target = Object.entries(request.target)
       .map(([key, value]) => `${key}: ${value}`)
       .join(", ");
-    const status = request.status === "approved" ? "approved · chưa thực thi" : request.status;
+    const execution = (request.executions || []).map((item) => `${item.agent_id}: ${item.status}${item.result ? ` (${item.result})` : ""}`).join("; ");
+    const status = request.status === "approved" ? `approved${execution ? ` · ${execution}` : " · chờ agent"}` : request.status;
     const canReview = request.status === "pending" && request.requested_by !== currentUser.user_id;
     return `<tr data-request-id="${escapeHtml(request.request_id)}" data-requester="${escapeHtml(request.requested_by)}">
-      <td>${escapeHtml(actionNames[request.action] || request.action)}<small class="event-id">${escapeHtml(target)}</small></td>
+      <td>${escapeHtml(actionNames[actionName] || actionName)}<small class="event-id">${escapeHtml(target)}</small></td>
       <td>${escapeHtml(request.reason)}<small class="event-id">Người tạo: ${escapeHtml(request.requested_by)}</small></td>
       <td>${escapeHtml(status)}</td>
       <td>${canReview ? '<button class="response-approve" data-review="approved" type="button">Duyệt</button><button class="response-reject" data-review="rejected" type="button">Từ chối</button>' : "—"}</td>
@@ -402,6 +404,7 @@ async function createResponseRequest(event) {
   const action = values.get("action");
   const payload = { reason: values.get("reason") };
   let endpoint = `/api/response/${action}`;
+  if (action === "restore-host") endpoint = "/api/response/restore-host";
   if (action === "block-ip") {
     payload.ip_address = values.get("ip_address");
   } else {
