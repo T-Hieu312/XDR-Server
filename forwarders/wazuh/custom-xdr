@@ -1,0 +1,3 @@
+#!/bin/sh
+# Wazuh calls integrations without the .py extension; run the script with Wazuh's own Python.
+exec /var/ossec/framework/python/bin/python3 /var/ossec/integrations/custom-xdr.py "$@"
